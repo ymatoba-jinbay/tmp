@@ -1,0 +1,122 @@
+# kajima - ボーリング柱状図PDF情報抽出・評価パイプライン
+
+ボーリング柱状図PDFからLLMを使って情報を構造化抽出し、XMLの正解データと比較して精度を評価するツール群。
+
+## ディレクトリ構成
+
+```
+kajima/
+├── files/              # データ
+│   ├── pdf/            # 元データ（ボーリング柱状図PDF）627件
+│   ├── xml/            # 解析データ（Shift_JIS, CRLF）627件
+│   └── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
+│       ├── marker_markdown/
+│       ├── marker_html/
+│       └── position/
+├── schema.py           # Pydanticスキーマ定義（BoringInfo等）
+├── parse_xml.py        # XMLファイルの解析
+├── parse_pdf.py        # PDFからテキスト抽出・保存
+├── extract_llm.py      # LLMによる構造化情報抽出
+└── evaluate.py         # XML正解データとLLM結果の精度評価
+```
+
+PDF/XMLはファイル名でペアになっている（例: `BED01405_080103-012-004IBR.pdf` と `BED01405_080103-012-004IBR.xml`）。
+
+## パイプライン
+
+```
+PDF → [parse_pdf] → テキストファイル → [extract_llm] → JSON → [evaluate] ← XML
+```
+
+### Step 1: PDFからテキスト抽出
+
+```bash
+# pymupdf Markdown（テーブル構造付き、推奨） → kajima/files/parsed/pymupdf_markdown/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf_markdown
+
+# pymupdf HTML（位置・フォント情報付き） → kajima/files/parsed/pymupdf_html/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf_html
+
+# プレーンテキスト（pdfplumber） → kajima/files/parsed/text/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type text
+
+# marker markdown → kajima/files/parsed/marker_markdown/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type marker_markdown
+
+# marker HTML → kajima/files/parsed/marker_html/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type marker_html
+
+# 座標付きテキスト（pdfplumber） → kajima/files/parsed/position/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type position
+
+# 先頭5件のみ
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
+```
+
+抽出方式:
+
+| `--extraction-type` | 説明 | 出力先 | 出力拡張子 |
+|---|---|---|---|
+| `pymupdf_markdown` | pymupdf4llmでMarkdown変換（テーブル構造付き、推奨） | `kajima/files/parsed/pymupdf_markdown/` | `.md` |
+| `pymupdf_html` | pymupdfでHTML変換（位置・フォント情報付き） | `kajima/files/parsed/pymupdf_html/` | `.html` |
+| `text` | pdfplumberでプレーンテキスト抽出 | `kajima/files/parsed/text/` | `.txt` |
+| `marker_markdown` | markerでMarkdown変換（デフォルト） | `kajima/files/parsed/marker_markdown/` | `.md` |
+| `marker_html` | markerでHTML変換 | `kajima/files/parsed/marker_html/` | `.html` |
+| `position` | pdfplumberで文字座標付きテキスト | `kajima/files/parsed/position/` | `.txt` |
+
+> **Note**: markerは`disable_ocr=True`で設定済み（OCR再認識による文字欠落を防止）。pymupdf系はOCRを使わず埋め込みテキストを直接使用します。
+
+出力先: `--output-dir`（デフォルト: `kajima/files/parsed/<extraction_type>/`）
+
+### Step 2: LLMで構造化情報を抽出
+
+```bash
+# Gemini（VertexAI経由）
+uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/ --llm gemini
+
+# Claude（Bedrock経由）
+uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/ --llm claude
+
+# 単一ファイル指定
+uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/BED01405_080103-012-004IBR.md --llm gemini
+```
+
+出力先: `--output-dir`（デフォルト: `kajima_results/`）に `{ファイル名}_{llm}.json` として保存。
+
+### Step 3: 精度評価
+
+```bash
+# Gemini結果の評価
+uv run python -m kajima.evaluate --llm gemini
+
+# Claude結果の評価
+uv run python -m kajima.evaluate --llm claude
+
+# ディレクトリ指定
+uv run python -m kajima.evaluate --xml-dir kajima/files/xml --result-dir kajima_results --llm gemini
+```
+
+出力先: `--output`（デフォルト: `kajima_eval/{llm}_evaluation.json`）
+
+### XMLの単独解析
+
+```bash
+uv run python -m kajima.parse_xml kajima/files/xml/BED01405_080103-012-004IBR.xml
+```
+
+## 環境変数
+
+`.env` ファイルに設定（`extract_llm.py`のCLI実行時のみ読み込み）。
+
+| 変数 | 用途 |
+|---|---|
+| `PROJECT_ID` | GCP プロジェクトID（Gemini用） |
+| `LOCATION` | GCP リージョン（デフォルト: `us-central1`） |
+
+Claude（Bedrock経由）は AWS クレデンシャル（`AWS_PROFILE` 等）で認証。
+
+## 評価ロジック
+
+- XMLの値が空でないフィールドのみ評価対象（XMLの全内容がPDFに含まれるとは限らないため）
+- NFKC Unicode正規化後に完全一致で判定
+- ファイルごとの精度 + 全体の精度を算出
