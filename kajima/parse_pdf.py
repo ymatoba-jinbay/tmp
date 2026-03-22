@@ -11,10 +11,8 @@ class ExtractionType(str, Enum):
 
     TEXT = "text"
     POSITION = "position"
-    MARKER_MARKDOWN = "marker_markdown"
-    MARKER_HTML = "marker_html"
-    PYMUPDF_MARKDOWN = "pymupdf_markdown"
-    PYMUPDF_HTML = "pymupdf_html"
+    MARKDOWN = "markdown"
+    HTML = "html"
 
 
 def _extract_with_text(pdf_path: Path) -> str:
@@ -116,37 +114,7 @@ def _extract_with_position(pdf_path: Path) -> str:
         return "\n".join(lines)
 
 
-def _create_marker_converter(output_format: str):  # type: ignore[no-untyped-def]
-    """Create a marker PdfConverter (expensive, should be reused)."""
-    from marker.config.parser import ConfigParser
-    from marker.converters.pdf import PdfConverter
-    from marker.models import create_model_dict
-
-    config: dict = {
-        "output_format": output_format,
-        "disable_ocr": True,
-    }
-    config_parser = ConfigParser(config)
-
-    return PdfConverter(
-        config=config_parser.generate_config_dict(),
-        artifact_dict=create_model_dict(),
-        processor_list=config_parser.get_processors(),
-        renderer=config_parser.get_renderer(),
-        llm_service=config_parser.get_llm_service(),
-    )
-
-
-def _extract_with_marker(pdf_path: Path, converter) -> str:  # type: ignore[no-untyped-def]
-    """Extract text using a pre-built marker converter."""
-    from marker.output import text_from_rendered
-
-    rendered = converter(str(pdf_path))
-    text, _, _ = text_from_rendered(rendered)
-    return text
-
-
-def _extract_with_pymupdf_markdown(pdf_path: Path) -> str:
+def _extract_with_markdown(pdf_path: Path) -> str:
     """Extract markdown with table structure using pymupdf4llm."""
     import pymupdf4llm
 
@@ -155,7 +123,7 @@ def _extract_with_pymupdf_markdown(pdf_path: Path) -> str:
     return result
 
 
-def _extract_with_pymupdf_html(pdf_path: Path) -> str:
+def _extract_with_html(pdf_path: Path) -> str:
     """Extract HTML with position/font info using pymupdf."""
     import pymupdf
 
@@ -169,15 +137,13 @@ def _extract_with_pymupdf_html(pdf_path: Path) -> str:
 
 def extract_text_from_pdf(
     pdf_path: str | Path,
-    extraction_type: ExtractionType = ExtractionType.MARKER_MARKDOWN,
-    converter=None,  # type: ignore[no-untyped-def]
+    extraction_type: ExtractionType = ExtractionType.MARKDOWN,
 ) -> str:
     """Extract text from a PDF file.
 
     Args:
         pdf_path: Path to the PDF file.
         extraction_type: Extraction method to use.
-        converter: Pre-built marker converter (for batch reuse).
 
     Returns:
         Extracted text.
@@ -189,36 +155,24 @@ def extract_text_from_pdf(
             return _extract_with_text(pdf_path)
         case ExtractionType.POSITION:
             return _extract_with_position(pdf_path)
-        case ExtractionType.MARKER_MARKDOWN | ExtractionType.MARKER_HTML:
-            if converter is None:
-                fmt = (
-                    "markdown"
-                    if extraction_type == ExtractionType.MARKER_MARKDOWN
-                    else "html"
-                )
-                converter = _create_marker_converter(fmt)
-            return _extract_with_marker(pdf_path, converter)
-        case ExtractionType.PYMUPDF_MARKDOWN:
-            return _extract_with_pymupdf_markdown(pdf_path)
-        case ExtractionType.PYMUPDF_HTML:
-            return _extract_with_pymupdf_html(pdf_path)
+        case ExtractionType.MARKDOWN:
+            return _extract_with_markdown(pdf_path)
+        case ExtractionType.HTML:
+            return _extract_with_html(pdf_path)
 
 
 _SUFFIX_MAP: dict[ExtractionType, str] = {
     ExtractionType.TEXT: ".txt",
     ExtractionType.POSITION: ".txt",
-    ExtractionType.MARKER_MARKDOWN: ".md",
-    ExtractionType.MARKER_HTML: ".html",
-    ExtractionType.PYMUPDF_MARKDOWN: ".md",
-    ExtractionType.PYMUPDF_HTML: ".html",
+    ExtractionType.MARKDOWN: ".md",
+    ExtractionType.HTML: ".html",
 }
 
 
 def parse_and_save(
     pdf_path: str | Path,
-    extraction_type: ExtractionType = ExtractionType.MARKER_MARKDOWN,
+    extraction_type: ExtractionType = ExtractionType.MARKDOWN,
     output_dir: str | Path | None = None,
-    converter=None,  # type: ignore[no-untyped-def]
 ) -> Path:
     """Extract text from PDF and save to file.
 
@@ -227,7 +181,6 @@ def parse_and_save(
         extraction_type: Extraction method to use.
         output_dir: Directory to save results.
             Defaults to kajima/files/parsed/<extraction_type>.
-        converter: Pre-built marker converter (for batch reuse).
 
     Returns:
         Path to the saved file.
@@ -240,9 +193,7 @@ def parse_and_save(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    text = extract_text_from_pdf(
-        pdf_path, extraction_type, converter=converter
-    )
+    text = extract_text_from_pdf(pdf_path, extraction_type)
 
     suffix = _SUFFIX_MAP[extraction_type]
     output_path = output_dir / f"{pdf_path.stem}{suffix}"
@@ -263,7 +214,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--extraction-type",
         choices=[e.value for e in ExtractionType],
-        default=ExtractionType.MARKER_MARKDOWN.value,
+        default=ExtractionType.MARKDOWN.value,
         help="PDF text extraction method",
     )
     parser.add_argument(
@@ -282,19 +233,6 @@ if __name__ == "__main__":
     extraction_type = ExtractionType(args.extraction_type)
     pdf_path = Path(args.pdf_path)
 
-    # Build converter once for marker-based extraction
-    marker_converter = None
-    if extraction_type in (
-        ExtractionType.MARKER_MARKDOWN,
-        ExtractionType.MARKER_HTML,
-    ):
-        fmt = (
-            "markdown"
-            if extraction_type == ExtractionType.MARKER_MARKDOWN
-            else "html"
-        )
-        marker_converter = _create_marker_converter(fmt)
-
     if pdf_path.is_dir():
         pdf_files = sorted(pdf_path.glob("*.pdf"))
         if args.limit > 0:
@@ -308,7 +246,6 @@ if __name__ == "__main__":
                     pf,
                     extraction_type=extraction_type,
                     output_dir=args.output_dir,
-                    converter=marker_converter,
                 )
             except Exception as e:
                 print(f"  Error: {e}")
@@ -317,5 +254,4 @@ if __name__ == "__main__":
             pdf_path,
             extraction_type=extraction_type,
             output_dir=args.output_dir,
-            converter=marker_converter,
         )

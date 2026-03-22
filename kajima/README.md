@@ -10,8 +10,8 @@ kajima/
 │   ├── pdf/            # 元データ（ボーリング柱状図PDF）627件
 │   ├── xml/            # 解析データ（Shift_JIS, CRLF）627件
 │   └── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
-│       ├── marker_markdown/
-│       ├── marker_html/
+│       ├── markdown/
+│       ├── html/
 │       └── position/
 ├── schema.py           # Pydanticスキーマ定義（BoringInfo等）
 ├── parse_xml.py        # XMLファイルの解析
@@ -31,20 +31,14 @@ PDF → [parse_pdf] → テキストファイル → [extract_llm] → JSON → 
 ### Step 1: PDFからテキスト抽出
 
 ```bash
-# pymupdf Markdown（テーブル構造付き、推奨） → kajima/files/parsed/pymupdf_markdown/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf_markdown
+# Markdown（テーブル構造付き、推奨） → kajima/files/parsed/markdown/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type markdown
 
-# pymupdf HTML（位置・フォント情報付き） → kajima/files/parsed/pymupdf_html/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf_html
+# HTML（位置・フォント情報付き） → kajima/files/parsed/html/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type html
 
 # プレーンテキスト（pdfplumber） → kajima/files/parsed/text/
 uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type text
-
-# marker markdown → kajima/files/parsed/marker_markdown/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type marker_markdown
-
-# marker HTML → kajima/files/parsed/marker_html/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type marker_html
 
 # 座標付きテキスト（pdfplumber） → kajima/files/parsed/position/
 uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type position
@@ -57,14 +51,12 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 
 | `--extraction-type` | 説明 | 出力先 | 出力拡張子 |
 |---|---|---|---|
-| `pymupdf_markdown` | pymupdf4llmでMarkdown変換（テーブル構造付き、推奨） | `kajima/files/parsed/pymupdf_markdown/` | `.md` |
-| `pymupdf_html` | pymupdfでHTML変換（位置・フォント情報付き） | `kajima/files/parsed/pymupdf_html/` | `.html` |
+| `markdown` | pymupdf4llmでMarkdown変換（テーブル構造付き、デフォルト） | `kajima/files/parsed/markdown/` | `.md` |
+| `html` | pymupdfでHTML変換（位置・フォント情報付き） | `kajima/files/parsed/html/` | `.html` |
 | `text` | pdfplumberでプレーンテキスト抽出 | `kajima/files/parsed/text/` | `.txt` |
-| `marker_markdown` | markerでMarkdown変換（デフォルト） | `kajima/files/parsed/marker_markdown/` | `.md` |
-| `marker_html` | markerでHTML変換 | `kajima/files/parsed/marker_html/` | `.html` |
 | `position` | pdfplumberで文字座標付きテキスト | `kajima/files/parsed/position/` | `.txt` |
 
-> **Note**: markerは`disable_ocr=True`で設定済み（OCR再認識による文字欠落を防止）。pymupdf系はOCRを使わず埋め込みテキストを直接使用します。
+> **Note**: pymupdf系はOCRを使わず埋め込みテキストを直接使用します。
 
 出力先: `--output-dir`（デフォルト: `kajima/files/parsed/<extraction_type>/`）
 
@@ -72,13 +64,13 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 
 ```bash
 # Gemini（VertexAI経由）
-uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/ --llm gemini
+uv run python -m kajima.extract_llm kajima/files/parsed/markdown/ --llm gemini
 
 # Claude（Bedrock経由）
-uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/ --llm claude
+uv run python -m kajima.extract_llm kajima/files/parsed/markdown/ --llm claude
 
 # 単一ファイル指定
-uv run python -m kajima.extract_llm kajima/files/parsed/marker_markdown/BED01405_080103-012-004IBR.md --llm gemini
+uv run python -m kajima.extract_llm kajima/files/parsed/markdown/BED01405_080103-012-004IBR.md --llm gemini
 ```
 
 出力先: `--output-dir`（デフォルト: `kajima_results/`）に `{ファイル名}_{llm}.json` として保存。
