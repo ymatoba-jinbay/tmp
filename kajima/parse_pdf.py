@@ -13,6 +13,7 @@ class ExtractionType(str, Enum):
     POSITION = "position"
     MARKDOWN = "markdown"
     HTML = "html"
+    PYMUPDF = "pymupdf"
 
 
 def _extract_with_text(pdf_path: Path) -> str:
@@ -123,6 +124,82 @@ def _extract_with_markdown(pdf_path: Path) -> str:
     return result
 
 
+def _table_to_markdown(table: list[list[str | None]]) -> str:
+    """Convert a table (list of rows) to markdown table string."""
+    if not table:
+        return ""
+    rows = []
+    for row in table:
+        cells = [str(c).replace("\n", " ") if c else "" for c in row]
+        rows.append("| " + " | ".join(cells) + " |")
+    if len(rows) >= 1:
+        sep = "| " + " | ".join("---" for _ in table[0]) + " |"
+        rows.insert(1, sep)
+    return "\n".join(rows)
+
+
+def _extract_with_pymupdf(pdf_path: Path) -> str:
+    """Extract text and tables from PDF using pymupdf (no OCR)."""
+    import pymupdf
+
+    doc = pymupdf.open(str(pdf_path))
+    pages = []
+    for page_idx, page in enumerate(doc):
+        tabs = page.find_tables()
+        table_rects = [t.bbox for t in tabs.tables]
+
+        # テーブル領域外のテキストを抽出
+        non_table_blocks = []
+        blocks = page.get_text("dict")["blocks"]
+        for block in blocks:
+            if block["type"] != 0:
+                continue
+            bx0, by0, bx1, by1 = (
+                block["bbox"][0],
+                block["bbox"][1],
+                block["bbox"][2],
+                block["bbox"][3],
+            )
+            in_table = False
+            for tx0, ty0, tx1, ty1 in table_rects:
+                if bx0 >= tx0 - 1 and by0 >= ty0 - 1 and bx1 <= tx1 + 1 and by1 <= ty1 + 1:
+                    in_table = True
+                    break
+            if not in_table:
+                lines_text = []
+                for line in block["lines"]:
+                    spans_text = "".join(
+                        span["text"] for span in line["spans"]
+                    )
+                    if spans_text.strip():
+                        lines_text.append(spans_text)
+                if lines_text:
+                    non_table_blocks.append({
+                        "y": by0,
+                        "content": "\n".join(lines_text),
+                    })
+
+        # テーブルをmarkdown化
+        table_blocks = []
+        for t, rect in zip(tabs.tables, table_rects):
+            md = _table_to_markdown(t.extract())
+            if md.strip():
+                table_blocks.append({
+                    "y": rect[1],
+                    "content": "\n" + md + "\n",
+                })
+
+        # y座標順にソートして結合
+        all_blocks = non_table_blocks + table_blocks
+        all_blocks.sort(key=lambda b: b["y"])
+        page_text = "\n".join(b["content"] for b in all_blocks)
+        if page_text.strip():
+            pages.append(page_text)
+
+    doc.close()
+    return "\n\n".join(pages)
+
+
 def _extract_with_html(pdf_path: Path) -> str:
     """Extract HTML with position/font info using pymupdf."""
     import pymupdf
@@ -159,6 +236,8 @@ def extract_text_from_pdf(
             return _extract_with_markdown(pdf_path)
         case ExtractionType.HTML:
             return _extract_with_html(pdf_path)
+        case ExtractionType.PYMUPDF:
+            return _extract_with_pymupdf(pdf_path)
 
 
 _SUFFIX_MAP: dict[ExtractionType, str] = {
@@ -166,6 +245,7 @@ _SUFFIX_MAP: dict[ExtractionType, str] = {
     ExtractionType.POSITION: ".txt",
     ExtractionType.MARKDOWN: ".md",
     ExtractionType.HTML: ".html",
+    ExtractionType.PYMUPDF: ".md",
 }
 
 
