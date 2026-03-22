@@ -9,22 +9,10 @@ import pdfplumber
 class ExtractionType(str, Enum):
     """PDF text extraction method."""
 
-    TEXT = "text"
     POSITION = "position"
-    MARKDOWN = "markdown"
+    PYMUPDF4LLM = "pymupdf4llm"
     HTML = "html"
     PYMUPDF = "pymupdf"
-
-
-def _extract_with_text(pdf_path: Path) -> str:
-    """Extract plain text from PDF using pdfplumber."""
-    with pdfplumber.open(pdf_path) as pdf:
-        texts = []
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                texts.append(text)
-        return "\n".join(texts)
 
 
 def _group_vertical_words(
@@ -144,7 +132,7 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
 
     doc = pymupdf.open(str(pdf_path))
     pages = []
-    for page_idx, page in enumerate(doc):
+    for page in doc:
         tabs = page.find_tables()
         table_rects = [t.bbox for t in tabs.tables]
 
@@ -154,17 +142,11 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
         for block in blocks:
             if block["type"] != 0:
                 continue
-            bx0, by0, bx1, by1 = (
-                block["bbox"][0],
-                block["bbox"][1],
-                block["bbox"][2],
-                block["bbox"][3],
+            bx0, by0, bx1, by1 = block["bbox"]
+            in_table = any(
+                bx0 >= tx0 - 1 and by0 >= ty0 - 1 and bx1 <= tx1 + 1 and by1 <= ty1 + 1
+                for tx0, ty0, tx1, ty1 in table_rects
             )
-            in_table = False
-            for tx0, ty0, tx1, ty1 in table_rects:
-                if bx0 >= tx0 - 1 and by0 >= ty0 - 1 and bx1 <= tx1 + 1 and by1 <= ty1 + 1:
-                    in_table = True
-                    break
             if not in_table:
                 lines_text = []
                 for line in block["lines"]:
@@ -200,21 +182,17 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
     return "\n\n".join(pages)
 
 
-def _extract_with_html(pdf_path: Path) -> str:
-    """Extract HTML with position/font info using pymupdf."""
-    import pymupdf
+def _convert_markdown_to_html(md_path: Path) -> str:
+    """Convert a parsed markdown file to HTML."""
+    import markdown
 
-    doc = pymupdf.open(str(pdf_path))
-    pages = []
-    for page in doc:
-        pages.append(page.get_text("html"))
-    doc.close()
-    return "\n".join(pages)
+    md_text = md_path.read_text(encoding="utf-8")
+    return markdown.markdown(md_text, extensions=["tables"])
 
 
 def extract_text_from_pdf(
     pdf_path: str | Path,
-    extraction_type: ExtractionType = ExtractionType.MARKDOWN,
+    extraction_type: ExtractionType = ExtractionType.PYMUPDF4LLM,
 ) -> str:
     """Extract text from a PDF file.
 
@@ -228,22 +206,22 @@ def extract_text_from_pdf(
     pdf_path = Path(pdf_path)
 
     match extraction_type:
-        case ExtractionType.TEXT:
-            return _extract_with_text(pdf_path)
         case ExtractionType.POSITION:
             return _extract_with_position(pdf_path)
-        case ExtractionType.MARKDOWN:
+        case ExtractionType.PYMUPDF4LLM:
             return _extract_with_markdown(pdf_path)
         case ExtractionType.HTML:
-            return _extract_with_html(pdf_path)
+            raise ValueError(
+                "HTML type converts from parsed markdown. "
+                "Use parse_and_save() instead."
+            )
         case ExtractionType.PYMUPDF:
             return _extract_with_pymupdf(pdf_path)
 
 
 _SUFFIX_MAP: dict[ExtractionType, str] = {
-    ExtractionType.TEXT: ".txt",
     ExtractionType.POSITION: ".txt",
-    ExtractionType.MARKDOWN: ".md",
+    ExtractionType.PYMUPDF4LLM: ".md",
     ExtractionType.HTML: ".html",
     ExtractionType.PYMUPDF: ".md",
 }
@@ -251,7 +229,7 @@ _SUFFIX_MAP: dict[ExtractionType, str] = {
 
 def parse_and_save(
     pdf_path: str | Path,
-    extraction_type: ExtractionType = ExtractionType.MARKDOWN,
+    extraction_type: ExtractionType = ExtractionType.PYMUPDF4LLM,
     output_dir: str | Path | None = None,
 ) -> Path:
     """Extract text from PDF and save to file.
@@ -273,7 +251,32 @@ def parse_and_save(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    text = extract_text_from_pdf(pdf_path, extraction_type)
+    if extraction_type == ExtractionType.HTML:
+        base_parsed = Path("kajima/files/parsed")
+        md_sources = {
+            "pymupdf": base_parsed / "pymupdf",
+            "pymupdf4llm": base_parsed / "pymupdf4llm",
+        }
+        saved_paths = []
+        for source_name, source_dir in md_sources.items():
+            md_path = source_dir / f"{pdf_path.stem}.md"
+            if not md_path.exists():
+                continue
+            out_dir = base_parsed / f"{source_name}_html"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            html = _convert_markdown_to_html(md_path)
+            out = out_dir / f"{pdf_path.stem}.html"
+            out.write_text(html, encoding="utf-8")
+            print(f"Saved: {out}")
+            saved_paths.append(out)
+        if not saved_paths:
+            raise FileNotFoundError(
+                f"No markdown files found for {pdf_path.stem}. "
+                "Run pymupdf/pymupdf4llm extraction first."
+            )
+        return saved_paths[0]
+    else:
+        text = extract_text_from_pdf(pdf_path, extraction_type)
 
     suffix = _SUFFIX_MAP[extraction_type]
     output_path = output_dir / f"{pdf_path.stem}{suffix}"
@@ -294,7 +297,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--extraction-type",
         choices=[e.value for e in ExtractionType],
-        default=ExtractionType.MARKDOWN.value,
+        default=ExtractionType.PYMUPDF4LLM.value,
         help="PDF text extraction method",
     )
     parser.add_argument(

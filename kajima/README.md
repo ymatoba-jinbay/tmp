@@ -10,8 +10,10 @@ kajima/
 │   ├── pdf/            # 元データ（ボーリング柱状図PDF）627件
 │   ├── xml/            # 解析データ（Shift_JIS, CRLF）627件
 │   └── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
-│       ├── markdown/
-│       ├── html/
+│       ├── pymupdf4llm/ # pymupdf4llmでMarkdown変換
+│       ├── pymupdf/     # pymupdfでテキスト+テーブル検出（Markdown）
+│       ├── pymupdf_html/    # pymupdf MarkdownからHTML変換
+│       ├── pymupdf4llm_html/ # pymupdf4llm MarkdownからHTML変換
 │       └── position/
 ├── schema.py           # Pydanticスキーマ定義（BoringInfo等）
 ├── parse_xml.py        # XMLファイルの解析
@@ -26,19 +28,20 @@ PDF/XMLはファイル名でペアになっている（例: `BED01405_080103-012
 
 ```
 PDF → [parse_pdf] → テキストファイル → [extract_llm] → JSON → [evaluate] ← XML
+PDF ──────────────────────────────────→ [extract_llm] → JSON → [evaluate] ← XML
 ```
 
 ### Step 1: PDFからテキスト抽出
 
 ```bash
-# Markdown（テーブル構造付き、推奨） → kajima/files/parsed/markdown/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type markdown
+# pymupdf4llm（テーブル構造付きMarkdown） → kajima/files/parsed/pymupdf4llm/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf4llm
 
-# HTML（位置・フォント情報付き） → kajima/files/parsed/html/
+# pymupdf（テキスト+テーブル検出、Markdown） → kajima/files/parsed/pymupdf/
+uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type pymupdf
+
+# HTML（パース済みMarkdownから変換） → kajima/files/parsed/{pymupdf,pymupdf4llm}_html/
 uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type html
-
-# プレーンテキスト（pdfplumber） → kajima/files/parsed/text/
-uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type text
 
 # 座標付きテキスト（pdfplumber） → kajima/files/parsed/position/
 uv run python -m kajima.parse_pdf kajima/files/pdf/ --extraction-type position
@@ -51,26 +54,29 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 
 | `--extraction-type` | 説明 | 出力先 | 出力拡張子 |
 |---|---|---|---|
-| `markdown` | pymupdf4llmでMarkdown変換（テーブル構造付き、デフォルト） | `kajima/files/parsed/markdown/` | `.md` |
-| `html` | pymupdfでHTML変換（位置・フォント情報付き） | `kajima/files/parsed/html/` | `.html` |
-| `text` | pdfplumberでプレーンテキスト抽出 | `kajima/files/parsed/text/` | `.txt` |
+| `pymupdf4llm` | pymupdf4llmでMarkdown変換（テーブル構造付き、デフォルト） | `kajima/files/parsed/pymupdf4llm/` | `.md` |
+| `pymupdf` | pymupdfでテキスト+テーブル検出（OCRなし） | `kajima/files/parsed/pymupdf/` | `.md` |
+| `html` | パース済みMarkdown（pymupdf/pymupdf4llm）をHTMLに変換 | `kajima/files/parsed/{source}_html/` | `.html` |
 | `position` | pdfplumberで文字座標付きテキスト | `kajima/files/parsed/position/` | `.txt` |
 
-> **Note**: pymupdf系はOCRを使わず埋め込みテキストを直接使用します。
+> **Note**: pymupdf系はOCRを使わず埋め込みテキストを直接使用します。HTML変換は事前にpymupdf/pymupdf4llm方式のMarkdown出力が必要です。
 
 出力先: `--output-dir`（デフォルト: `kajima/files/parsed/<extraction_type>/`）
 
 ### Step 2: LLMで構造化情報を抽出
 
 ```bash
-# Gemini（VertexAI経由）
-uv run python -m kajima.extract_llm kajima/files/parsed/markdown/ --llm gemini
+# パース済みテキストから（Gemini）
+uv run python -m kajima.extract_llm kajima/files/parsed/pymupdf/ --llm gemini
 
-# Claude（Bedrock経由）
-uv run python -m kajima.extract_llm kajima/files/parsed/markdown/ --llm claude
+# パース済みテキストから（Claude）
+uv run python -m kajima.extract_llm kajima/files/parsed/pymupdf/ --llm claude
+
+# PDFを直接LLMに渡す
+uv run python -m kajima.extract_llm kajima/files/pdf/ --llm gemini
 
 # 単一ファイル指定
-uv run python -m kajima.extract_llm kajima/files/parsed/markdown/BED01405_080103-012-004IBR.md --llm gemini
+uv run python -m kajima.extract_llm kajima/files/pdf/BED01405_080103-012-004IBR.pdf --llm gemini
 ```
 
 出力先: `--output-dir`（デフォルト: `kajima_results/`）に `{ファイル名}_{llm}.json` として保存。
