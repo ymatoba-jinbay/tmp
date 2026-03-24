@@ -125,6 +125,14 @@ uv run python -m kajima.parse_xml kajima/files/xml/BED01405_080103-012-004IBR.xm
 uv run python -m kajima.parse_xml kajima/files/xml/BED01405_080103-012-004IBR.xml --schema
 ```
 
+## 前提条件
+
+OCR機能を使用するには Tesseract のインストールが必要です。
+
+```bash
+sudo apt-get install -y tesseract-ocr tesseract-ocr-jpn
+```
+
 ## 環境変数
 
 `.env` ファイルに設定（`extract_llm.py`のCLI実行時のみ読み込み）。
