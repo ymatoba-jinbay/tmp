@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
+
 from kajima.parse_xml import build_json_schema, parse_xml
+
+load_dotenv()
 
 EXTRACTION_PROMPT = """\
 以下はボーリング柱状図PDFから抽出されたテキストです。
@@ -413,10 +417,6 @@ def process_file(
 
 if __name__ == "__main__":
     import argparse
-
-    from dotenv import load_dotenv
-
-    load_dotenv()
 
     parser = argparse.ArgumentParser(
         description="Extract boring info using LLM"
