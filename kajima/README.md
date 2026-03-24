@@ -8,21 +8,35 @@
 kajima/
 ├── files/              # データ
 │   ├── pdf/            # 元データ（ボーリング柱状図PDF）627件
-│   ├── xml/            # 解析データ（Shift_JIS, CRLF）627件
+│   ├── xml/            # 解析データ（UTF-8変換済み）627件
 │   └── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
 │       ├── pymupdf4llm/ # pymupdf4llmでMarkdown変換
 │       ├── pymupdf/     # pymupdfでテキスト+テーブル検出（Markdown）
 │       ├── pymupdf_html/    # pymupdf MarkdownからHTML変換
 │       ├── pymupdf4llm_html/ # pymupdf4llm MarkdownからHTML変換
 │       └── position/
-├── schema.py           # Pydanticスキーマ定義（BoringInfo等）
-├── parse_xml.py        # XMLファイルの解析
+├── parse_xml.py        # XMLファイルの汎用dict変換・動的スキーマ生成
 ├── parse_pdf.py        # PDFからテキスト抽出・保存
-├── extract_llm.py      # LLMによる構造化情報抽出
+├── extract_llm.py      # LLMによる構造化情報抽出（XMLから動的スキーマ生成）
 └── evaluate.py         # XML正解データとLLM結果の精度評価
 ```
 
 PDF/XMLはファイル名でペアになっている（例: `BED01405_080103-012-004IBR.pdf` と `BED01405_080103-012-004IBR.xml`）。
+
+## アーキテクチャ
+
+### 動的スキーマ生成
+
+固定のPydanticスキーマではなく、**対応するXMLの構造を都度解析して動的にJSON Schemaを生成**する。
+
+- `parse_xml.py` がXMLを日本語タグ名をキーとしたネストdictに変換
+- `build_json_schema()` がそのdictからJSON Schemaを推論
+- LLMにはそのファイルに実際に存在するフィールドだけのスキーマが渡される
+
+これにより：
+- ファイルごとに異なるフィールド構成に自動対応
+- スキーマのキーが日本語のままなのでLLMが正確にマッピング可能
+- 新しいタグが増えてもコード変更不要
 
 ## パイプライン
 
@@ -65,6 +79,8 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 
 ### Step 2: LLMで構造化情報を抽出
 
+対応するXMLからスキーマを動的に生成し、そのスキーマに基づいてPDF/テキストから情報を抽出する。
+
 ```bash
 # パース済みテキストから（Gemini）
 uv run python -m kajima.extract_llm kajima/files/parsed/pymupdf/ --llm gemini
@@ -77,6 +93,9 @@ uv run python -m kajima.extract_llm kajima/files/pdf/ --llm gemini
 
 # 単一ファイル指定
 uv run python -m kajima.extract_llm kajima/files/pdf/BED01405_080103-012-004IBR.pdf --llm gemini
+
+# XMLディレクトリを指定（デフォルト: kajima/files/xml）
+uv run python -m kajima.extract_llm kajima/files/pdf/ --llm gemini --xml-dir kajima/files/xml
 ```
 
 出力先: `--output-dir`（デフォルト: `kajima_results/`）に `{ファイル名}_{llm}.json` として保存。
@@ -99,7 +118,11 @@ uv run python -m kajima.evaluate --xml-dir kajima/files/xml --result-dir kajima_
 ### XMLの単独解析
 
 ```bash
+# XMLをネストdictとしてJSON出力（日本語タグ名がキー）
 uv run python -m kajima.parse_xml kajima/files/xml/BED01405_080103-012-004IBR.xml
+
+# 動的に生成されるJSON Schemaを確認
+uv run python -m kajima.parse_xml kajima/files/xml/BED01405_080103-012-004IBR.xml --schema
 ```
 
 ## 環境変数
@@ -115,6 +138,7 @@ Claude（Bedrock経由）は AWS クレデンシャル（`AWS_PROFILE` 等）で
 
 ## 評価ロジック
 
+- XMLとLLM結果をそれぞれフラットなkey-valueペア（ドット記法）に変換して比較
 - XMLの値が空でないフィールドのみ評価対象（XMLの全内容がPDFに含まれるとは限らないため）
 - NFKC Unicode正規化後に完全一致で判定
 - ファイルごとの精度 + 全体の精度を算出

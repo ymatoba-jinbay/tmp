@@ -1,14 +1,17 @@
 """Evaluate LLM extraction results against XML ground truth."""
 
 import json
+import re
 import unicodedata
+from collections import defaultdict
 from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel
 
 from kajima.parse_xml import parse_xml
-from kajima.schema import BoringInfo
+
+FILES_DIR = Path(__file__).resolve().parent / "files"
+XML_DIR = FILES_DIR / "xml"
+
+PARSE_TYPES = ["pdf", "pymupdf", "markdown", "html", "pymupdf_html"]
 
 
 def _normalize(value: str) -> str:
@@ -16,120 +19,178 @@ def _normalize(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip()
 
 
-def _flatten_model(model: BoringInfo) -> dict[str, str]:
-    """Flatten a model into key-value pairs for comparison."""
-    flat: dict[str, str] = {}
-    header = model.header_info
+def _flatten(
+    data: object,
+    prefix: str = "",
+    out: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Flatten a nested dict/list into dot-notation key-value pairs."""
+    if out is None:
+        out = {}
 
-    for section_name, section in [
-        ("survey_basic_info", header.survey_basic_info),
-        ("coordinate_info", header.coordinate_info),
-        ("ordering_organization", header.ordering_organization),
-        ("survey_period", header.survey_period),
-        ("survey_company", header.survey_company),
-        ("boring_basic_info", header.boring_basic_info),
-    ]:
-        for field_name, value in section.model_dump().items():
-            key = f"header_info.{section_name}.{field_name}"
-            flat[key] = str(value)
+    if isinstance(data, dict):
+        for k, v in data.items():
+            key = f"{prefix}.{k}" if prefix else k
+            _flatten(v, key, out)
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            _flatten(item, f"{prefix}[{i}]", out)
+    else:
+        out[prefix] = str(data) if data is not None else ""
 
-    core = model.core_info
-    for field_name in type(core).model_fields:
-        items = getattr(core, field_name)
-        if not isinstance(items, list):
-            continue
-        for i, item in enumerate(items):
-            if not isinstance(item, BaseModel):
-                continue
-            for k, v in item.model_dump().items():
-                flat[f"core_info.{field_name}[{i}].{k}"] = str(v)
+    return out
 
-    return flat
+
+def _section_key(field: str) -> str:
+    """Extract section key (top 2 levels) from a dot-notation field.
+
+    e.g. "コア情報.標準貫入試験[0].開始深度" -> "コア情報.標準貫入試験"
+    """
+    parts = re.split(r"[.\[]", field)
+    depth = min(len(parts), 2)
+    return ".".join(parts[:depth])
+
+
+def _classify_error(xml_norm: str, llm_norm: str) -> str:
+    """Classify the type of mismatch between xml and llm values."""
+    try:
+        xml_f = float(xml_norm)
+        llm_f = float(llm_norm)
+        if xml_f != 0 and abs(xml_f - llm_f) / abs(xml_f) < 0.01:
+            return "numeric_close"
+    except ValueError:
+        pass
+
+    if xml_norm in llm_norm or llm_norm in xml_norm:
+        return "partial_match"
+
+    return "wrong_value"
 
 
 def evaluate_single(
-    xml_data: BoringInfo,
-    llm_data: BoringInfo,
+    xml_data: dict,
+    llm_data: dict,
 ) -> dict:
     """Evaluate a single file.
 
-    Only evaluates fields where XML has non-empty values,
-    since not all XML content may be present in the PDF.
+    Evaluation focuses on precision: only fields where LLM returned
+    a non-empty value are scored as correct/incorrect.
+    Fields where LLM returned empty are tracked separately as
+    not_extracted (may or may not be present in the PDF).
     """
-    xml_flat = _flatten_model(xml_data)
-    llm_flat = _flatten_model(llm_data)
+    xml_flat = _flatten(xml_data)
+    llm_flat = _flatten(llm_data)
 
     details: list[dict] = []
-    matched = 0
-    mismatched = 0
-    missing_in_llm = 0
-    non_empty_xml_fields = 0
+    correct = 0
+    incorrect = 0
+    not_extracted = 0
 
     for key, xml_value in xml_flat.items():
         xml_norm = _normalize(xml_value)
         if not xml_norm:
             continue
 
-        non_empty_xml_fields += 1
         llm_value = llm_flat.get(key, "")
         llm_norm = _normalize(llm_value)
 
         if not llm_norm:
-            missing_in_llm += 1
-            status = "missing"
-        elif xml_norm == llm_norm:
-            matched += 1
-            status = "match"
-        else:
-            mismatched += 1
-            status = "mismatch"
+            not_extracted += 1
+            details.append({
+                "field": key,
+                "section": _section_key(key),
+                "status": "not_extracted",
+                "xml": xml_value,
+                "llm": "",
+            })
+            continue
 
-        details.append({
-            "field": key,
-            "status": status,
-            "xml": xml_value,
-            "llm": llm_value,
-        })
+        if xml_norm == llm_norm:
+            correct += 1
+            details.append({
+                "field": key,
+                "section": _section_key(key),
+                "status": "correct",
+                "xml": xml_value,
+                "llm": llm_value,
+            })
+        else:
+            incorrect += 1
+            error_type = _classify_error(xml_norm, llm_norm)
+            details.append({
+                "field": key,
+                "section": _section_key(key),
+                "status": "incorrect",
+                "error_type": error_type,
+                "xml": xml_value,
+                "llm": llm_value,
+            })
+
+    evaluated = correct + incorrect
+    precision = correct / evaluated if evaluated > 0 else 0.0
 
     return {
-        "total_xml_fields": len(xml_flat),
-        "non_empty_xml_fields": non_empty_xml_fields,
-        "matched": matched,
-        "mismatched": mismatched,
-        "missing_in_llm": missing_in_llm,
-        "accuracy": (
-            matched / non_empty_xml_fields
-            if non_empty_xml_fields > 0
-            else 0.0
-        ),
+        "correct": correct,
+        "incorrect": incorrect,
+        "not_extracted": not_extracted,
+        "evaluated": evaluated,
+        "precision": precision,
         "details": details,
     }
 
 
+def _aggregate_sections(
+    all_details: list[dict],
+) -> dict[str, dict]:
+    """Aggregate evaluation results by section."""
+    sections: dict[str, dict] = defaultdict(
+        lambda: {
+            "correct": 0,
+            "incorrect": 0,
+            "not_extracted": 0,
+            "error_types": defaultdict(int),
+        }
+    )
+
+    for d in all_details:
+        section = d["section"]
+        status = d["status"]
+        sections[section][status] += 1
+        if status == "incorrect":
+            sections[section]["error_types"][
+                d["error_type"]
+            ] += 1
+
+    result = {}
+    for section, counts in sorted(sections.items()):
+        evaluated = counts["correct"] + counts["incorrect"]
+        result[section] = {
+            "correct": counts["correct"],
+            "incorrect": counts["incorrect"],
+            "not_extracted": counts["not_extracted"],
+            "evaluated": evaluated,
+            "precision": (
+                counts["correct"] / evaluated
+                if evaluated > 0
+                else 0.0
+            ),
+            "error_types": dict(counts["error_types"]),
+        }
+
+    return result
+
+
 def evaluate_batch(
-    xml_dir: str | Path,
-    result_dir: str | Path,
-    llm: Literal["gemini", "claude"] = "gemini",
-    output_path: str | Path | None = None,
+    result_dir: Path,
+    xml_dir: Path,
+    output_path: Path,
 ) -> dict:
-    """Run batch evaluation.
+    """Run batch evaluation."""
+    all_file_results: list[dict] = []
+    all_details: list[dict] = []
 
-    Args:
-        xml_dir: Directory containing XML files.
-        result_dir: Directory containing LLM extraction results.
-        llm: LLM name.
-        output_path: Path to save evaluation results.
-
-    Returns:
-        Summary results.
-    """
-    xml_dir = Path(xml_dir)
-    result_dir = Path(result_dir)
-
-    all_results: list[dict] = []
-
-    for result_file in sorted(result_dir.glob(f"*_{llm}.json")):
-        stem = result_file.stem.replace(f"_{llm}", "")
+    for result_file in sorted(result_dir.glob("*.json")):
+        stem = result_file.stem
         xml_file = xml_dir / f"{stem}.xml"
 
         try:
@@ -141,61 +202,120 @@ def evaluate_batch(
             continue
 
         with open(result_file, "r", encoding="utf-8") as f:
-            llm_data = BoringInfo.model_validate(json.load(f))
+            llm_data = json.load(f)
 
         result = evaluate_single(xml_data, llm_data)
         result["file"] = stem
-        all_results.append(result)
+        all_file_results.append(result)
+        all_details.extend(result["details"])
 
-    total_non_empty = sum(
-        r["non_empty_xml_fields"] for r in all_results
+    total_correct = sum(r["correct"] for r in all_file_results)
+    total_incorrect = sum(r["incorrect"] for r in all_file_results)
+    total_evaluated = total_correct + total_incorrect
+    total_not_extracted = sum(
+        r["not_extracted"] for r in all_file_results
     )
-    total_matched = sum(r["matched"] for r in all_results)
+
+    section_analysis = _aggregate_sections(all_details)
+
+    error_type_totals: dict[str, int] = defaultdict(int)
+    for d in all_details:
+        if d["status"] == "incorrect":
+            error_type_totals[d["error_type"]] += 1
+
+    incorrect_examples: list[dict] = [
+        {
+            "file": r["file"],
+            "field": d["field"],
+            "error_type": d["error_type"],
+            "xml": d["xml"],
+            "llm": d["llm"],
+        }
+        for r in all_file_results
+        for d in r["details"]
+        if d["status"] == "incorrect"
+    ]
 
     summary = {
-        "llm": llm,
-        "total_files": len(all_results),
-        "total_non_empty_fields": total_non_empty,
-        "total_matched": total_matched,
-        "total_mismatched": sum(
-            r["mismatched"] for r in all_results
-        ),
-        "total_missing": sum(
-            r["missing_in_llm"] for r in all_results
-        ),
-        "overall_accuracy": (
-            total_matched / total_non_empty
-            if total_non_empty > 0
+        "total_files": len(all_file_results),
+        "total_correct": total_correct,
+        "total_incorrect": total_incorrect,
+        "total_evaluated": total_evaluated,
+        "total_not_extracted": total_not_extracted,
+        "overall_precision": (
+            total_correct / total_evaluated
+            if total_evaluated > 0
             else 0.0
         ),
-        "per_file": all_results,
+        "error_type_totals": dict(error_type_totals),
+        "section_analysis": section_analysis,
+        "incorrect_examples": incorrect_examples,
+        "per_file": [
+            {k: v for k, v in r.items() if k != "details"}
+            for r in all_file_results
+        ],
     }
 
-    if output_path is not None:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-        print(f"Evaluation saved: {output_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"Evaluation saved: {output_path}")
 
-    print(f"\n=== Evaluation Summary ({llm}) ===")
-    print(f"Files evaluated: {summary['total_files']}")
-    print(
-        f"Non-empty XML fields: {summary['total_non_empty_fields']}"
-    )
-    print(f"Matched: {summary['total_matched']}")
-    print(f"Mismatched: {summary['total_mismatched']}")
-    print(f"Missing in LLM: {summary['total_missing']}")
-    print(f"Overall accuracy: {summary['overall_accuracy']:.2%}")
-
-    print("\nPer-file accuracy:")
-    for r in all_results:
-        print(
-            f"  {r['file']}: {r['accuracy']:.2%} "
-            f"({r['matched']}/{r['non_empty_xml_fields']})"
-        )
+    _print_summary(summary)
 
     return summary
+
+
+def _print_summary(summary: dict) -> None:
+    """Print evaluation summary to stdout."""
+    print(f"\nFiles: {summary['total_files']}")
+    print(
+        f"Evaluated: {summary['total_evaluated']} "
+        f"(not extracted: {summary['total_not_extracted']})"
+    )
+    print(
+        f"Correct: {summary['total_correct']}  "
+        f"Incorrect: {summary['total_incorrect']}"
+    )
+    print(
+        f"Precision: {summary['overall_precision']:.2%}"
+    )
+
+    if summary["error_type_totals"]:
+        print("\nError types:")
+        for etype, count in sorted(
+            summary["error_type_totals"].items(),
+            key=lambda x: -x[1],
+        ):
+            print(f"  {etype}: {count}")
+
+    print("\nSection analysis:")
+    for section, stats in summary["section_analysis"].items():
+        if stats["evaluated"] == 0:
+            continue
+        print(
+            f"  {section}: "
+            f"{stats['precision']:.0%} "
+            f"({stats['correct']}/{stats['evaluated']})"
+            + (
+                f"  errors: {dict(stats['error_types'])}"
+                if stats["error_types"]
+                else ""
+            )
+        )
+
+    worst = sorted(
+        summary["per_file"],
+        key=lambda r: r["precision"],
+    )[:5]
+    if worst and worst[0]["precision"] < 1.0:
+        print("\nWorst 5 files:")
+        for r in worst:
+            print(
+                f"  {r['file']}: {r['precision']:.0%} "
+                f"({r['correct']}/{r['evaluated']}, "
+                f"{r['incorrect']} incorrect)"
+            )
 
 
 if __name__ == "__main__":
@@ -205,24 +325,42 @@ if __name__ == "__main__":
         description="Evaluate LLM extraction accuracy"
     )
     parser.add_argument(
+        "--parse-type",
+        choices=PARSE_TYPES,
+        default="pdf",
+        help="Input parse type (default: pdf)",
+    )
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Model name (e.g. gemini-2.5-flash)",
+    )
+    parser.add_argument(
         "--xml-dir",
-        default="kajima/files/xml",
-        help="XML directory",
-    )
-    parser.add_argument(
-        "--result-dir",
-        default="kajima_results",
-        help="LLM result directory",
-    )
-    parser.add_argument(
-        "--llm", choices=["gemini", "claude"], default="gemini"
-    )
-    parser.add_argument(
-        "--output", default=None, help="Evaluation output path"
+        default=None,
+        help="XML directory (default: kajima/files/xml)",
     )
     args = parser.parse_args()
 
-    output = args.output or f"kajima_eval/{args.llm}_evaluation.json"
-    evaluate_batch(
-        args.xml_dir, args.result_dir, llm=args.llm, output_path=output
+    xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
+    model_short = args.model.split("/")[-1].split(":")[0]
+
+    result_dir = (
+        FILES_DIR / f"results_{model_short}" / args.parse_type
     )
+    output_path = (
+        FILES_DIR
+        / f"evaluations_{model_short}"
+        / f"{args.parse_type}.json"
+    )
+
+    if not result_dir.exists():
+        print(f"Result directory not found: {result_dir}")
+        raise SystemExit(1)
+
+    print(f"Model: {args.model}")
+    print(f"Parse type: {args.parse_type}")
+    print(f"Results: {result_dir}")
+    print(f"Output: {output_path}")
+
+    evaluate_batch(result_dir, xml_dir, output_path)

@@ -2,10 +2,11 @@
 
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from kajima.schema import BoringInfo
+from kajima.parse_xml import build_json_schema, parse_xml
 
 EXTRACTION_PROMPT = """\
 以下はボーリング柱状図PDFから抽出されたテキストです。
@@ -31,11 +32,102 @@ PDF_EXTRACTION_PROMPT = """\
 
 JSONのみを出力してください。説明は不要です。"""
 
-_SCHEMA_JSON = json.dumps(
-    BoringInfo.model_json_schema(),
-    ensure_ascii=False,
-    indent=2,
-)
+RETRY_PROMPT = """\
+前回の出力に以下のエラーがありました。修正して再度JSONのみを出力してください。
+
+エラー:
+{errors}
+
+出力するJSONスキーマ:
+{schema}
+
+JSONのみを出力してください。"""
+
+FILES_DIR = Path(__file__).resolve().parent / "files"
+XML_DIR = FILES_DIR / "xml"
+
+PARSE_TYPES = ["pdf", "pymupdf", "markdown", "html", "pymupdf_html"]
+MAX_RETRIES = 2
+
+_gemini_client = None
+_claude_client = None
+
+
+def get_gemini_client():  # type: ignore[no-untyped-def]
+    """Get or create a cached Gemini client."""
+    global _gemini_client  # noqa: PLW0603
+    if _gemini_client is None:
+        from google import genai
+
+        _gemini_client = genai.Client(
+            vertexai=True,
+            project=os.environ["PROJECT_ID"],
+            location=os.environ.get("LOCATION", "us-central1"),
+        )
+    return _gemini_client
+
+
+def get_claude_client(
+    region: str = "us-east-1",
+):  # type: ignore[no-untyped-def]
+    """Get or create a cached Claude client."""
+    global _claude_client  # noqa: PLW0603
+    if _claude_client is None:
+        import anthropic
+
+        _claude_client = anthropic.AnthropicBedrock(
+            aws_region=region
+        )
+    return _claude_client
+
+
+@dataclass
+class TokenUsage:
+    """Token usage statistics."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class ExtractionResult:
+    """Result of LLM extraction."""
+
+    data: dict = field(default_factory=dict)
+    usage: TokenUsage = field(default_factory=TokenUsage)
+
+
+def _resolve_schema(stem: str, xml_dir: Path) -> str:
+    """Build a JSON schema string from the corresponding XML file."""
+    xml_path = xml_dir / f"{stem}.xml"
+    if not xml_path.exists():
+        msg = f"Corresponding XML not found: {xml_path}"
+        raise FileNotFoundError(msg)
+    data = parse_xml(xml_path)
+    schema = build_json_schema(data)
+    return json.dumps(schema, ensure_ascii=False, indent=2)
+
+
+def _validate_schema(data: dict, schema: dict) -> None:
+    """Validate data against a JSON Schema.
+
+    Raises ValueError with all validation errors on failure.
+    """
+    import jsonschema
+
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(
+        validator.iter_errors(data),
+        key=lambda e: list(e.absolute_path),
+    )
+    if errors:
+        messages = []
+        for e in errors:
+            path = ".".join(str(p) for p in e.absolute_path)
+            loc = path or "root"
+            messages.append(f"  - {loc}: {e.message}")
+        msg = "Schema validation failed:\n" + "\n".join(messages)
+        raise ValueError(msg)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -56,32 +148,61 @@ def _strip_markdown_fences(text: str) -> str:
     return "\n".join(json_lines)
 
 
-def _gemini_client(client=None):  # type: ignore[no-untyped-def]
-    """Get or create a Gemini client."""
-    if client is not None:
-        return client
-    from google import genai
+def _parse_and_validate(
+    result_text: str, schema: dict
+) -> dict:
+    """Parse JSON text and validate against schema.
 
-    return genai.Client(
-        vertexai=True,
-        project=os.environ["PROJECT_ID"],
-        location=os.environ.get("LOCATION", "us-central1"),
+    Raises json.JSONDecodeError or ValueError on failure.
+    """
+    data = json.loads(result_text)
+    _validate_schema(data, schema)
+    return data
+
+
+def _resolve_input_dir(parse_type: str) -> Path:
+    """Resolve input directory from parse_type."""
+    if parse_type == "pdf":
+        return FILES_DIR / "pdf"
+    return FILES_DIR / "parsed" / parse_type
+
+
+def _resolve_output_dir(parse_type: str, model_name: str) -> Path:
+    """Resolve output directory."""
+    model_short = model_name.split("/")[-1].split(":")[0]
+    return FILES_DIR / f"results_{model_short}" / parse_type
+
+
+def _list_input_files(
+    input_dir: Path, parse_type: str
+) -> list[Path]:
+    """List input files for the given parse_type."""
+    if parse_type == "pdf":
+        return sorted(input_dir.glob("*.pdf"))
+    return sorted(
+        list(input_dir.glob("*.md"))
+        + list(input_dir.glob("*.html"))
+        + list(input_dir.glob("*.txt"))
     )
 
 
 def extract_with_gemini(
+    stem: str,
     text: str | None = None,
     pdf_path: Path | None = None,
     model_name: str = "gemini-2.5-flash",
-    client=None,  # type: ignore[no-untyped-def]
-) -> BoringInfo:
+    xml_dir: Path = XML_DIR,
+) -> ExtractionResult:
     """Extract information using Gemini via VertexAI."""
     from google.genai import types
 
-    client = _gemini_client(client)
+    client = get_gemini_client()
+
+    schema_json = _resolve_schema(stem, xml_dir)
+    schema = json.loads(schema_json)
 
     if pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=_SCHEMA_JSON)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
         parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
@@ -91,66 +212,78 @@ def extract_with_gemini(
         ]
     else:
         prompt = EXTRACTION_PROMPT.format(
-            schema=_SCHEMA_JSON, text=text
+            schema=schema_json, text=text
         )
         parts = [types.Part(text=prompt)]
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[
-            types.Content(role="user", parts=parts)
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-    )
+    total_usage = TokenUsage()
+    last_error = ""
 
-    result_text = (response.text or "").strip()
-    return BoringInfo.model_validate_json(result_text)
+    for attempt in range(1 + MAX_RETRIES):
+        if attempt > 0:
+            retry_prompt = RETRY_PROMPT.format(
+                errors=last_error, schema=schema_json
+            )
+            parts = [types.Part(text=retry_prompt)]
+            print(f"    Retry {attempt}/{MAX_RETRIES}")
 
-
-def _claude_client(client=None, region: str = "us-east-1"):  # type: ignore[no-untyped-def]
-    """Get or create a Claude client."""
-    if client is not None:
-        return client
-    import anthropic
-
-    return anthropic.AnthropicBedrock(aws_region=region)
-
-
-def _parse_claude_response(response) -> BoringInfo:  # type: ignore[no-untyped-def]
-    """Parse Claude response into BoringInfo."""
-    import anthropic
-
-    first_block = response.content[0]
-    if not isinstance(first_block, anthropic.types.TextBlock):
-        msg = (
-            f"Expected TextBlock, got {type(first_block).__name__}"
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Content(role="user", parts=parts)
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
         )
-        raise TypeError(msg)
-    result_text = _strip_markdown_fences(first_block.text.strip())
-    return BoringInfo.model_validate_json(result_text)
+
+        if response.usage_metadata:
+            total_usage.input_tokens += (
+                response.usage_metadata.prompt_token_count or 0
+            )
+            total_usage.output_tokens += (
+                response.usage_metadata.candidates_token_count or 0
+            )
+
+        result_text = (response.text or "").strip()
+        try:
+            data = _parse_and_validate(result_text, schema)
+            return ExtractionResult(
+                data=data, usage=total_usage
+            )
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt == MAX_RETRIES:
+                raise
+
+    raise RuntimeError("Unreachable")
 
 
 def extract_with_claude(
+    stem: str,
     text: str | None = None,
     pdf_path: Path | None = None,
     model_name: str = "anthropic.claude-sonnet-4-20250514-v1:0",
     region: str = "us-east-1",
-    client=None,  # type: ignore[no-untyped-def]
-) -> BoringInfo:
+    xml_dir: Path = XML_DIR,
+) -> ExtractionResult:
     """Extract information using Claude via Bedrock."""
     import base64
 
-    client = _claude_client(client, region)
+    import anthropic
+
+    client = get_claude_client(region)
+
+    schema_json = _resolve_schema(stem, xml_dir)
+    schema = json.loads(schema_json)
 
     if pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=_SCHEMA_JSON)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
         pdf_b64 = base64.standard_b64encode(
             pdf_path.read_bytes()
         ).decode("ascii")
-        content: str | list = [
+        initial_content: list = [
             {
                 "type": "document",
                 "source": {
@@ -162,69 +295,120 @@ def extract_with_claude(
             {"type": "text", "text": prompt},
         ]
     else:
-        content = EXTRACTION_PROMPT.format(
-            schema=_SCHEMA_JSON, text=text
+        initial_content = [
+            {
+                "type": "text",
+                "text": EXTRACTION_PROMPT.format(
+                    schema=schema_json, text=text
+                ),
+            }
+        ]
+
+    total_usage = TokenUsage()
+    last_error = ""
+    result_text = ""
+    messages: list = [
+        {"role": "user", "content": initial_content}
+    ]
+
+    for attempt in range(1 + MAX_RETRIES):
+        if attempt > 0:
+            retry_prompt = RETRY_PROMPT.format(
+                errors=last_error, schema=schema_json
+            )
+            messages = [
+                *messages,
+                {"role": "assistant", "content": result_text},
+                {"role": "user", "content": retry_prompt},
+            ]
+            print(f"    Retry {attempt}/{MAX_RETRIES}")
+
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=8192,
+            messages=messages,  # type: ignore[arg-type]
         )
 
-    response = client.messages.create(
-        model=model_name,
-        max_tokens=8192,
-        messages=[{"role": "user", "content": content}],
-    )
-    return _parse_claude_response(response)
+        total_usage.input_tokens += response.usage.input_tokens
+        total_usage.output_tokens += response.usage.output_tokens
+
+        first_block = response.content[0]
+        if not isinstance(first_block, anthropic.types.TextBlock):
+            msg = (
+                f"Expected TextBlock, "
+                f"got {type(first_block).__name__}"
+            )
+            raise TypeError(msg)
+        result_text = _strip_markdown_fences(
+            first_block.text.strip()
+        )
+
+        try:
+            data = _parse_and_validate(result_text, schema)
+            return ExtractionResult(
+                data=data, usage=total_usage
+            )
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt == MAX_RETRIES:
+                raise
+
+    raise RuntimeError("Unreachable")
 
 
-def process_text(
-    text_path: str | Path,
-    llm: Literal["gemini", "claude"] = "gemini",
-    output_dir: str | Path = "kajima_results",
-    client=None,  # type: ignore[no-untyped-def]
-) -> BoringInfo:
-    """Read parsed text (or PDF) and extract boring info with LLM.
+def process_file(
+    file_path: Path,
+    llm: Literal["gemini", "claude"],
+    output_dir: Path,
+    xml_dir: Path = XML_DIR,
+    model_name: str | None = None,
+) -> ExtractionResult:
+    """Extract boring info from a single file.
 
     Args:
-        text_path: Path to the parsed text file or PDF.
+        file_path: Path to the input file (PDF or parsed text).
         llm: LLM to use.
         output_dir: Directory to save results.
-        client: Pre-built LLM client (for batch reuse).
+        xml_dir: Directory containing XML files for schema generation.
+        model_name: Optional model name override.
 
     Returns:
-        Extracted boring information.
+        Extraction result with data and token usage.
     """
-    text_path = Path(text_path)
-    is_pdf = text_path.suffix.lower() == ".pdf"
+    stem = file_path.stem
+    is_pdf = file_path.suffix.lower() == ".pdf"
+
+    kwargs: dict = {"xml_dir": xml_dir}
+    if model_name is not None:
+        kwargs["model_name"] = model_name
 
     if is_pdf:
         if llm == "gemini":
-            result = extract_with_gemini(pdf_path=text_path, client=client)
+            result = extract_with_gemini(
+                stem, pdf_path=file_path, **kwargs
+            )
         else:
-            result = extract_with_claude(pdf_path=text_path, client=client)
+            result = extract_with_claude(
+                stem, pdf_path=file_path, **kwargs
+            )
     else:
-        text = text_path.read_text(encoding="utf-8")
+        text = file_path.read_text(encoding="utf-8")
         if llm == "gemini":
-            result = extract_with_gemini(text=text, client=client)
+            result = extract_with_gemini(
+                stem, text=text, **kwargs
+            )
         else:
-            result = extract_with_claude(text=text, client=client)
+            result = extract_with_claude(
+                stem, text=text, **kwargs
+            )
 
-    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = text_path.stem
-    output_path = output_dir / f"{stem}_{llm}.json"
+    output_path = output_dir / f"{stem}.json"
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(
-            result.model_dump(), f, ensure_ascii=False, indent=2
-        )
-    print(f"Saved: {output_path}")
+        json.dump(result.data, f, ensure_ascii=False, indent=2)
+    print(f"  Saved: {output_path}")
 
     return result
-
-
-def _create_client(llm: Literal["gemini", "claude"]):  # type: ignore[no-untyped-def]
-    """Create an LLM client."""
-    if llm == "gemini":
-        return _gemini_client()
-    else:
-        return _claude_client()
 
 
 if __name__ == "__main__":
@@ -235,19 +419,23 @@ if __name__ == "__main__":
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Extract boring info from parsed text using LLM"
+        description="Extract boring info using LLM"
     )
     parser.add_argument(
-        "text_path",
-        help="Path to parsed text file or directory",
+        "--parse-type",
+        choices=PARSE_TYPES,
+        default="pdf",
+        help="Input type (default: pdf)",
     )
     parser.add_argument(
-        "--llm", choices=["gemini", "claude"], default="gemini"
+        "--llm",
+        choices=["gemini", "claude"],
+        default="gemini",
     )
     parser.add_argument(
-        "--output-dir",
-        default="kajima_results",
-        help="Output directory",
+        "--model",
+        default=None,
+        help="Model name override",
     )
     parser.add_argument(
         "--limit",
@@ -255,36 +443,57 @@ if __name__ == "__main__":
         default=0,
         help="Max files to process (0=all)",
     )
+    parser.add_argument(
+        "--xml-dir",
+        default=None,
+        help="XML directory (default: kajima/files/xml)",
+    )
     args = parser.parse_args()
 
-    llm_client = _create_client(args.llm)
-    text_path = Path(args.text_path)
-    if text_path.is_dir():
-        text_files = sorted(
-            list(text_path.glob("*.md"))
-            + list(text_path.glob("*.html"))
-            + list(text_path.glob("*.txt"))
-            + list(text_path.glob("*.pdf"))
-        )
-        if args.limit > 0:
-            text_files = text_files[:args.limit]
-        for i, tf in enumerate(text_files):
-            print(
-                f"[{i + 1}/{len(text_files)}] Processing: {tf.name}"
+    xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
+
+    default_models = {
+        "gemini": "gemini-2.5-flash",
+        "claude": "anthropic.claude-sonnet-4-20250514-v1:0",
+    }
+    model_name = args.model or default_models[args.llm]
+
+    input_dir = _resolve_input_dir(args.parse_type)
+    output_dir = _resolve_output_dir(args.parse_type, model_name)
+
+    if not input_dir.exists():
+        print(f"Input directory not found: {input_dir}")
+        raise SystemExit(1)
+
+    input_files = _list_input_files(input_dir, args.parse_type)
+    if args.limit > 0:
+        input_files = input_files[: args.limit]
+
+    print(f"LLM: {args.llm} ({model_name})")
+    print(f"Parse type: {args.parse_type}")
+    print(f"Input: {input_dir} ({len(input_files)} files)")
+    print(f"Output: {output_dir}")
+    print()
+
+    total_input = 0
+    total_output = 0
+
+    for i, f in enumerate(input_files):
+        print(f"[{i + 1}/{len(input_files)}] {f.name}")
+        try:
+            result = process_file(
+                f,
+                llm=args.llm,
+                output_dir=output_dir,
+                xml_dir=xml_dir,
+                model_name=model_name,
             )
-            try:
-                process_text(
-                    tf,
-                    llm=args.llm,
-                    output_dir=args.output_dir,
-                    client=llm_client,
-                )
-            except Exception as e:
-                print(f"  Error: {e}")
-    else:
-        process_text(
-            text_path,
-            llm=args.llm,
-            output_dir=args.output_dir,
-            client=llm_client,
-        )
+            total_input += result.usage.input_tokens
+            total_output += result.usage.output_tokens
+        except Exception as e:
+            print(f"  Error: {e}")
+
+    print("\n=== Token Usage ===")
+    print(f"Input tokens:  {total_input:,}")
+    print(f"Output tokens: {total_output:,}")
+    print(f"Total tokens:  {total_input + total_output:,}")
