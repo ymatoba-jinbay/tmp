@@ -130,6 +130,9 @@ uv run python -m kajima.evaluate --model anthropic.claude-sonnet-4-20250514-v1:0
 # parse-typeを指定
 uv run python -m kajima.evaluate --model gemini-2.5-flash --parse-type pymupdf
 
+# 全parse typeを一括評価（results_<llm>/ 内のサブディレクトリを自動検出）
+uv run python -m kajima.evaluate --model gemini-2.5-flash --parse-type all
+
 # XMLディレクトリを指定
 uv run python -m kajima.evaluate --model gemini-2.5-flash --xml-dir kajima/files/xml
 ```
@@ -139,8 +142,10 @@ uv run python -m kajima.evaluate --model gemini-2.5-flash --xml-dir kajima/files
 | フラグ | 説明 | デフォルト |
 |---|---|---|
 | `--model` | モデル名（**必須**） | - |
-| `--parse-type` | 入力parse type（`pdf`, `pymupdf`, `markdown`, `html`, `pymupdf_html`） | `pdf` |
+| `--parse-type` | 入力parse type（`pdf`, `pymupdf`, `markdown`, `html`, `pymupdf_html`, `all`） | `pdf` |
 | `--xml-dir` | XMLディレクトリ | `kajima/files/xml` |
+
+> **Note**: `--parse-type all` を指定すると、`results_<llm>/` 内に存在する全サブディレクトリ（parse type）を自動検出し、それぞれに対して評価を実行します。
 
 結果ディレクトリ: `kajima/files/results_{model}/{parse_type}/`
 出力先: `kajima/files/evaluations_{model}/{parse_type}.json`
