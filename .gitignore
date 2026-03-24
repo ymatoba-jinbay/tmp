@@ -10,5 +10,7 @@ wheels/
 kajima/files/
 vpn/auth.txt
 
+.env
+jinbay-gcp.json
 # Virtual environments
 .venv

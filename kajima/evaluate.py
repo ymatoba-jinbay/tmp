@@ -11,7 +11,7 @@ from kajima.parse_xml import parse_xml
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "pymupdf", "markdown", "html", "pymupdf_html"]
+PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf"]
 
 
 def _normalize(value: str) -> str:
@@ -49,6 +49,15 @@ def _section_key(field: str) -> str:
     parts = re.split(r"[.\[]", field)
     depth = min(len(parts), 2)
     return ".".join(parts[:depth])
+
+
+def _top_section_key(field: str) -> str:
+    """Extract top-level section key from a dot-notation field.
+
+    e.g. "コア情報.標準貫入試験[0].開始深度" -> "コア情報"
+    """
+    parts = re.split(r"[.\[]", field)
+    return parts[0]
 
 
 def _classify_error(xml_norm: str, llm_norm: str) -> str:
@@ -98,6 +107,7 @@ def evaluate_single(
             not_extracted += 1
             details.append({
                 "field": key,
+                "top_section": _top_section_key(key),
                 "section": _section_key(key),
                 "status": "not_extracted",
                 "xml": xml_value,
@@ -109,6 +119,7 @@ def evaluate_single(
             correct += 1
             details.append({
                 "field": key,
+                "top_section": _top_section_key(key),
                 "section": _section_key(key),
                 "status": "correct",
                 "xml": xml_value,
@@ -119,6 +130,7 @@ def evaluate_single(
             error_type = _classify_error(xml_norm, llm_norm)
             details.append({
                 "field": key,
+                "top_section": _top_section_key(key),
                 "section": _section_key(key),
                 "status": "incorrect",
                 "error_type": error_type,
@@ -139,45 +151,66 @@ def evaluate_single(
     }
 
 
+def _build_stats(counts: dict) -> dict:
+    """Build stats dict from raw counts."""
+    evaluated = counts["correct"] + counts["incorrect"]
+    return {
+        "correct": counts["correct"],
+        "incorrect": counts["incorrect"],
+        "not_extracted": counts["not_extracted"],
+        "evaluated": evaluated,
+        "precision": (
+            counts["correct"] / evaluated
+            if evaluated > 0
+            else 0.0
+        ),
+        "error_types": dict(counts["error_types"]),
+    }
+
+
+def _new_counter() -> dict:
+    return {
+        "correct": 0,
+        "incorrect": 0,
+        "not_extracted": 0,
+        "error_types": defaultdict(int),
+    }
+
+
 def _aggregate_sections(
     all_details: list[dict],
 ) -> dict[str, dict]:
-    """Aggregate evaluation results by section."""
-    sections: dict[str, dict] = defaultdict(
-        lambda: {
-            "correct": 0,
-            "incorrect": 0,
-            "not_extracted": 0,
-            "error_types": defaultdict(int),
-        }
-    )
+    """Aggregate evaluation results by section.
+
+    Returns dict with two keys:
+      - "top": top-level section stats
+      - "sub": sub-section (top 2 levels) stats
+    """
+    top_sections: dict[str, dict] = defaultdict(_new_counter)
+    sub_sections: dict[str, dict] = defaultdict(_new_counter)
 
     for d in all_details:
-        section = d["section"]
         status = d["status"]
-        sections[section][status] += 1
-        if status == "incorrect":
-            sections[section]["error_types"][
-                d["error_type"]
-            ] += 1
+        for key, target in [
+            (d["top_section"], top_sections),
+            (d["section"], sub_sections),
+        ]:
+            target[key][status] += 1
+            if status == "incorrect":
+                target[key]["error_types"][
+                    d["error_type"]
+                ] += 1
 
-    result = {}
-    for section, counts in sorted(sections.items()):
-        evaluated = counts["correct"] + counts["incorrect"]
-        result[section] = {
-            "correct": counts["correct"],
-            "incorrect": counts["incorrect"],
-            "not_extracted": counts["not_extracted"],
-            "evaluated": evaluated,
-            "precision": (
-                counts["correct"] / evaluated
-                if evaluated > 0
-                else 0.0
-            ),
-            "error_types": dict(counts["error_types"]),
-        }
-
-    return result
+    return {
+        "top": {
+            k: _build_stats(v)
+            for k, v in sorted(top_sections.items())
+        },
+        "sub": {
+            k: _build_stats(v)
+            for k, v in sorted(sub_sections.items())
+        },
+    }
 
 
 def evaluate_batch(
@@ -289,8 +322,25 @@ def _print_summary(summary: dict) -> None:
         ):
             print(f"  {etype}: {count}")
 
-    print("\nSection analysis:")
-    for section, stats in summary["section_analysis"].items():
+    section_analysis = summary["section_analysis"]
+
+    print("\nSection analysis (top-level):")
+    for section, stats in section_analysis["top"].items():
+        if stats["evaluated"] == 0:
+            continue
+        print(
+            f"  {section}: "
+            f"{stats['precision']:.0%} "
+            f"({stats['correct']}/{stats['evaluated']})"
+            + (
+                f"  errors: {dict(stats['error_types'])}"
+                if stats["error_types"]
+                else ""
+            )
+        )
+
+    print("\nSection analysis (sub-section):")
+    for section, stats in section_analysis["sub"].items():
         if stats["evaluated"] == 0:
             continue
         print(
@@ -326,14 +376,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--parse-type",
-        choices=PARSE_TYPES,
+        choices=PARSE_TYPES + ["all"],
         default="pdf",
-        help="Input parse type (default: pdf)",
+        help="Input parse type (default: pdf, 'all' to run all types found in results dir)",
     )
     parser.add_argument(
-        "--model",
-        required=True,
-        help="Model name (e.g. gemini-2.5-flash)",
+        "--llm",
+        choices=["gemini", "claude"],
+        default="gemini",
     )
     parser.add_argument(
         "--xml-dir",
@@ -343,24 +393,41 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
-    model_short = args.model.split("/")[-1].split(":")[0]
 
-    result_dir = (
-        FILES_DIR / f"results_{model_short}" / args.parse_type
-    )
-    output_path = (
-        FILES_DIR
-        / f"evaluations_{model_short}"
-        / f"{args.parse_type}.json"
-    )
+    if args.parse_type == "all":
+        results_base = FILES_DIR / f"results_{args.llm}"
+        if not results_base.exists():
+            print(f"Results base directory not found: {results_base}")
+            raise SystemExit(1)
+        parse_types = sorted(
+            d.name
+            for d in results_base.iterdir()
+            if d.is_dir()
+        )
+        if not parse_types:
+            print(f"No parse type directories found in: {results_base}")
+            raise SystemExit(1)
+    else:
+        parse_types = [args.parse_type]
 
-    if not result_dir.exists():
-        print(f"Result directory not found: {result_dir}")
-        raise SystemExit(1)
+    for parse_type in parse_types:
+        result_dir = (
+            FILES_DIR / f"results_{args.llm}" / parse_type
+        )
+        output_path = (
+            FILES_DIR
+            / f"evaluations_{args.llm}"
+            / f"{parse_type}.json"
+        )
 
-    print(f"Model: {args.model}")
-    print(f"Parse type: {args.parse_type}")
-    print(f"Results: {result_dir}")
-    print(f"Output: {output_path}")
+        if not result_dir.exists():
+            print(f"Result directory not found: {result_dir}, skipping")
+            continue
 
-    evaluate_batch(result_dir, xml_dir, output_path)
+        print(f"\n{'='*60}")
+        print(f"LLM: {args.llm}")
+        print(f"Parse type: {parse_type}")
+        print(f"Results: {result_dir}")
+        print(f"Output: {output_path}")
+
+        evaluate_batch(result_dir, xml_dir, output_path)

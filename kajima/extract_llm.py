@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -50,7 +51,7 @@ JSONのみを出力してください。"""
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "pymupdf", "markdown", "html", "pymupdf_html"]
+PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf"]
 MAX_RETRIES = 2
 
 _gemini_client = None
@@ -99,6 +100,7 @@ class ExtractionResult:
 
     data: dict = field(default_factory=dict)
     usage: TokenUsage = field(default_factory=TokenUsage)
+    elapsed_seconds: float = 0.0
 
 
 def _resolve_schema(stem: str, xml_dir: Path) -> str:
@@ -171,10 +173,9 @@ def _resolve_input_dir(parse_type: str) -> Path:
     return FILES_DIR / "parsed" / parse_type
 
 
-def _resolve_output_dir(parse_type: str, model_name: str) -> Path:
+def _resolve_output_dir(parse_type: str, llm: str) -> Path:
     """Resolve output directory."""
-    model_short = model_name.split("/")[-1].split(":")[0]
-    return FILES_DIR / f"results_{model_short}" / parse_type
+    return FILES_DIR / f"results_{llm}" / parse_type
 
 
 def _list_input_files(
@@ -194,7 +195,7 @@ def extract_with_gemini(
     stem: str,
     text: str | None = None,
     pdf_path: Path | None = None,
-    model_name: str = "gemini-2.5-flash",
+    model_name: str = "gemini-2.5-pro",
     xml_dir: Path = XML_DIR,
 ) -> ExtractionResult:
     """Extract information using Gemini via VertexAI."""
@@ -365,7 +366,6 @@ def process_file(
     llm: Literal["gemini", "claude"],
     output_dir: Path,
     xml_dir: Path = XML_DIR,
-    model_name: str | None = None,
 ) -> ExtractionResult:
     """Extract boring info from a single file.
 
@@ -374,7 +374,6 @@ def process_file(
         llm: LLM to use.
         output_dir: Directory to save results.
         xml_dir: Directory containing XML files for schema generation.
-        model_name: Optional model name override.
 
     Returns:
         Extraction result with data and token usage.
@@ -383,8 +382,8 @@ def process_file(
     is_pdf = file_path.suffix.lower() == ".pdf"
 
     kwargs: dict = {"xml_dir": xml_dir}
-    if model_name is not None:
-        kwargs["model_name"] = model_name
+
+    start_time = time.monotonic()
 
     if is_pdf:
         if llm == "gemini":
@@ -405,6 +404,8 @@ def process_file(
             result = extract_with_claude(
                 stem, text=text, **kwargs
             )
+
+    result.elapsed_seconds = time.monotonic() - start_time
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{stem}.json"
@@ -433,11 +434,6 @@ if __name__ == "__main__":
         default="gemini",
     )
     parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name override",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -452,14 +448,8 @@ if __name__ == "__main__":
 
     xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
 
-    default_models = {
-        "gemini": "gemini-2.5-flash",
-        "claude": "anthropic.claude-sonnet-4-20250514-v1:0",
-    }
-    model_name = args.model or default_models[args.llm]
-
     input_dir = _resolve_input_dir(args.parse_type)
-    output_dir = _resolve_output_dir(args.parse_type, model_name)
+    output_dir = _resolve_output_dir(args.parse_type, args.llm)
 
     if not input_dir.exists():
         print(f"Input directory not found: {input_dir}")
@@ -469,7 +459,7 @@ if __name__ == "__main__":
     if args.limit > 0:
         input_files = input_files[: args.limit]
 
-    print(f"LLM: {args.llm} ({model_name})")
+    print(f"LLM: {args.llm}")
     print(f"Parse type: {args.parse_type}")
     print(f"Input: {input_dir} ({len(input_files)} files)")
     print(f"Output: {output_dir}")
@@ -477,6 +467,7 @@ if __name__ == "__main__":
 
     total_input = 0
     total_output = 0
+    total_elapsed = 0.0
 
     for i, f in enumerate(input_files):
         print(f"[{i + 1}/{len(input_files)}] {f.name}")
@@ -486,10 +477,11 @@ if __name__ == "__main__":
                 llm=args.llm,
                 output_dir=output_dir,
                 xml_dir=xml_dir,
-                model_name=model_name,
             )
             total_input += result.usage.input_tokens
             total_output += result.usage.output_tokens
+            total_elapsed += result.elapsed_seconds
+            print(f"  Time: {result.elapsed_seconds:.1f}s")
         except Exception as e:
             print(f"  Error: {e}")
 
@@ -497,3 +489,8 @@ if __name__ == "__main__":
     print(f"Input tokens:  {total_input:,}")
     print(f"Output tokens: {total_output:,}")
     print(f"Total tokens:  {total_input + total_output:,}")
+    print(f"\n=== Elapsed Time ===")
+    print(f"Total: {total_elapsed:.1f}s")
+
+    # Explicitly delete cached clients to avoid ImportError at shutdown
+    del _gemini_client, _claude_client

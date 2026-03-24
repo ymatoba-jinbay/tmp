@@ -9,12 +9,16 @@ kajima/
 ├── files/              # データ
 │   ├── pdf/            # 元データ（ボーリング柱状図PDF）627件
 │   ├── xml/            # 解析データ（UTF-8変換済み）627件
-│   └── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
-│       ├── pymupdf4llm/ # pymupdf4llmでMarkdown変換
-│       ├── pymupdf/     # pymupdfでテキスト+テーブル検出（Markdown）
-│       ├── pymupdf_html/    # pymupdf MarkdownからHTML変換
-│       ├── pymupdf4llm_html/ # pymupdf4llm MarkdownからHTML変換
-│       └── position/
+│   ├── parsed/         # PDFテキスト抽出結果（parse_pdfの出力先）
+│   │   ├── pymupdf4llm/ # pymupdf4llmでMarkdown変換
+│   │   ├── pymupdf/     # pymupdfでテキスト+テーブル検出（Markdown）
+│   │   ├── pymupdf_html/    # pymupdf MarkdownからHTML変換
+│   │   ├── pymupdf4llm_html/ # pymupdf4llm MarkdownからHTML変換
+│   │   └── position/    # pdfplumberで座標付きテキスト
+│   ├── results_{model}/ # LLM抽出結果（extract_llmの出力先）
+│   │   └── {parse_type}/ # parse_type別のJSON結果
+│   └── evaluations_{model}/ # 評価結果（evaluateの出力先）
+│       └── {parse_type}.json
 ├── parse_xml.py        # XMLファイルの汎用dict変換・動的スキーマ生成
 ├── parse_pdf.py        # PDFからテキスト抽出・保存
 ├── extract_llm.py      # LLMによる構造化情報抽出（XMLから動的スキーマ生成）
@@ -30,7 +34,7 @@ PDF/XMLはファイル名でペアになっている（例: `BED01405_080103-012
 固定のPydanticスキーマではなく、**対応するXMLの構造を都度解析して動的にJSON Schemaを生成**する。
 
 - `parse_xml.py` がXMLを日本語タグ名をキーとしたネストdictに変換
-- `build_json_schema()` がそのdictからJSON Schemaを推論
+- `build_json_schema()` がそのdictからJSON Schemaを推論（gensonライブラリ使用）
 - LLMにはそのファイルに実際に存在するフィールドだけのスキーマが渡される
 
 これにより：
@@ -82,38 +86,64 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 対応するXMLからスキーマを動的に生成し、そのスキーマに基づいてPDF/テキストから情報を抽出する。
 
 ```bash
+# PDFを直接Geminiに渡す（デフォルト: --parse-type pdf, --llm gemini）
+uv run python -m kajima.extract_llm
+
 # パース済みテキストから（Gemini）
-uv run python -m kajima.extract_llm kajima/files/parsed/pymupdf/ --llm gemini
+uv run python -m kajima.extract_llm --parse-type pymupdf --llm gemini
 
 # パース済みテキストから（Claude）
-uv run python -m kajima.extract_llm kajima/files/parsed/pymupdf/ --llm claude
+uv run python -m kajima.extract_llm --parse-type pymupdf --llm claude
 
-# PDFを直接LLMに渡す
-uv run python -m kajima.extract_llm kajima/files/pdf/ --llm gemini
+# モデル名を指定
+uv run python -m kajima.extract_llm --llm gemini --model gemini-2.5-flash
 
-# 単一ファイル指定
-uv run python -m kajima.extract_llm kajima/files/pdf/BED01405_080103-012-004IBR.pdf --llm gemini
+# 先頭5件のみ
+uv run python -m kajima.extract_llm --limit 5
 
 # XMLディレクトリを指定（デフォルト: kajima/files/xml）
-uv run python -m kajima.extract_llm kajima/files/pdf/ --llm gemini --xml-dir kajima/files/xml
+uv run python -m kajima.extract_llm --xml-dir kajima/files/xml
 ```
 
-出力先: `--output-dir`（デフォルト: `kajima_results/`）に `{ファイル名}_{llm}.json` として保存。
+オプション:
+
+| フラグ | 説明 | デフォルト |
+|---|---|---|
+| `--parse-type` | 入力タイプ（`pdf`, `pymupdf`, `markdown`, `html`, `pymupdf_html`） | `pdf` |
+| `--llm` | 使用するLLM（`gemini`, `claude`） | `gemini` |
+| `--model` | モデル名を上書き | Gemini: `gemini-2.5-flash`, Claude: `anthropic.claude-sonnet-4-20250514-v1:0` |
+| `--limit` | 処理するファイル数（0=全件） | `0` |
+| `--xml-dir` | XMLディレクトリ | `kajima/files/xml` |
+
+入力先: `kajima/files/pdf/`（parse-type=pdf）または `kajima/files/parsed/<parse_type>/`
+出力先: `kajima/files/results_{model}/{parse_type}/` に `{ファイル名}.json` として保存。
 
 ### Step 3: 精度評価
 
 ```bash
-# Gemini結果の評価
-uv run python -m kajima.evaluate --llm gemini
+# Gemini結果の評価（モデル名は必須）
+uv run python -m kajima.evaluate --model gemini-2.5-flash
 
 # Claude結果の評価
-uv run python -m kajima.evaluate --llm claude
+uv run python -m kajima.evaluate --model anthropic.claude-sonnet-4-20250514-v1:0
 
-# ディレクトリ指定
-uv run python -m kajima.evaluate --xml-dir kajima/files/xml --result-dir kajima_results --llm gemini
+# parse-typeを指定
+uv run python -m kajima.evaluate --model gemini-2.5-flash --parse-type pymupdf
+
+# XMLディレクトリを指定
+uv run python -m kajima.evaluate --model gemini-2.5-flash --xml-dir kajima/files/xml
 ```
 
-出力先: `--output`（デフォルト: `kajima_eval/{llm}_evaluation.json`）
+オプション:
+
+| フラグ | 説明 | デフォルト |
+|---|---|---|
+| `--model` | モデル名（**必須**） | - |
+| `--parse-type` | 入力parse type（`pdf`, `pymupdf`, `markdown`, `html`, `pymupdf_html`） | `pdf` |
+| `--xml-dir` | XMLディレクトリ | `kajima/files/xml` |
+
+結果ディレクトリ: `kajima/files/results_{model}/{parse_type}/`
+出力先: `kajima/files/evaluations_{model}/{parse_type}.json`
 
 ### XMLの単独解析
 
@@ -135,7 +165,7 @@ sudo apt-get install -y tesseract-ocr tesseract-ocr-jpn
 
 ## 環境変数
 
-`.env` ファイルに設定（`extract_llm.py`のCLI実行時のみ読み込み）。
+`.env` ファイルに設定（`extract_llm.py`のCLI実行時に自動読み込み）。
 
 | 変数 | 用途 |
 |---|---|
@@ -147,6 +177,8 @@ Claude（Bedrock経由）は AWS クレデンシャル（`AWS_PROFILE` 等）で
 ## 評価ロジック
 
 - XMLとLLM結果をそれぞれフラットなkey-valueペア（ドット記法）に変換して比較
-- XMLの値が空でないフィールドのみ評価対象（XMLの全内容がPDFに含まれるとは限らないため）
+- XMLの値が空でないフィールドのみ評価対象
+- LLMが値を返したフィールドのみ正誤判定（precisionベース）、未抽出フィールドは別集計
 - NFKC Unicode正規化後に完全一致で判定
-- ファイルごとの精度 + 全体の精度を算出
+- エラー分類: `numeric_close`（数値の微差）、`partial_match`（部分一致）、`wrong_value`（不一致）
+- ファイルごとの精度 + 全体の精度 + セクション別分析を算出
