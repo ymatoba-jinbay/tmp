@@ -1,5 +1,6 @@
 """Evaluate LLM extraction results against XML ground truth."""
 
+import io
 import json
 import re
 import unicodedata
@@ -11,7 +12,7 @@ from kajima.parse_xml import parse_xml
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf"]
+PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf", "jpg"]
 
 
 def _normalize(value: str) -> str:
@@ -294,41 +295,49 @@ def evaluate_batch(
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"Evaluation saved: {output_path}")
 
-    _print_summary(summary)
+    txt_path = output_path.with_suffix(".txt")
+    with open(txt_path, "w", encoding="utf-8") as txt_f:
+        _print_summary(summary, file=txt_f)
+    print(f"Summary saved: {txt_path}")
 
     return summary
 
 
-def _print_summary(summary: dict) -> None:
-    """Print evaluation summary to stdout."""
-    print(f"\nFiles: {summary['total_files']}")
-    print(
+def _print_summary(summary: dict, file=None) -> None:
+    """Print evaluation summary to stdout and optionally to a file object."""
+    def _p(msg: str = "") -> None:
+        print(msg)
+        if file is not None:
+            print(msg, file=file)
+
+    _p(f"\nFiles: {summary['total_files']}")
+    _p(
         f"Evaluated: {summary['total_evaluated']} "
         f"(not extracted: {summary['total_not_extracted']})"
     )
-    print(
+    _p(
         f"Correct: {summary['total_correct']}  "
         f"Incorrect: {summary['total_incorrect']}"
     )
-    print(
+    _p(
         f"Precision: {summary['overall_precision']:.2%}"
     )
 
     if summary["error_type_totals"]:
-        print("\nError types:")
+        _p("\nError types:")
         for etype, count in sorted(
             summary["error_type_totals"].items(),
             key=lambda x: -x[1],
         ):
-            print(f"  {etype}: {count}")
+            _p(f"  {etype}: {count}")
 
     section_analysis = summary["section_analysis"]
 
-    print("\nSection analysis (top-level):")
+    _p("\nSection analysis (top-level):")
     for section, stats in section_analysis["top"].items():
         if stats["evaluated"] == 0:
             continue
-        print(
+        _p(
             f"  {section}: "
             f"{stats['precision']:.0%} "
             f"({stats['correct']}/{stats['evaluated']})"
@@ -339,11 +348,11 @@ def _print_summary(summary: dict) -> None:
             )
         )
 
-    print("\nSection analysis (sub-section):")
+    _p("\nSection analysis (sub-section):")
     for section, stats in section_analysis["sub"].items():
         if stats["evaluated"] == 0:
             continue
-        print(
+        _p(
             f"  {section}: "
             f"{stats['precision']:.0%} "
             f"({stats['correct']}/{stats['evaluated']})"
@@ -359,9 +368,9 @@ def _print_summary(summary: dict) -> None:
         key=lambda r: r["precision"],
     )[:5]
     if worst and worst[0]["precision"] < 1.0:
-        print("\nWorst 5 files:")
+        _p("\nWorst 5 files:")
         for r in worst:
-            print(
+            _p(
                 f"  {r['file']}: {r['precision']:.0%} "
                 f"({r['correct']}/{r['evaluated']}, "
                 f"{r['incorrect']} incorrect)"
