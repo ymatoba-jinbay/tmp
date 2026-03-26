@@ -51,7 +51,7 @@ JSONのみを出力してください。"""
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf"]
+PARSE_TYPES = ["pdf", "jpg", "position", "pymupdf4llm", "html", "pymupdf"]
 MAX_RETRIES = 2
 
 _gemini_client = None
@@ -166,9 +166,32 @@ def _parse_and_validate(
     return data
 
 
+def _pdf_to_images(pdf_path: Path, dpi: int = 200) -> list[bytes]:
+    """Convert a PDF file to a list of JPEG image bytes."""
+    import io
+
+    import fitz
+    from PIL import Image
+
+    doc = fitz.open(pdf_path)
+    images: list[bytes] = []
+    zoom = dpi / 72
+    matrix = fitz.Matrix(zoom, zoom)
+    for page in doc:
+        pix = page.get_pixmap(matrix=matrix)
+        img = Image.frombytes(
+            "RGB", (pix.width, pix.height), pix.samples
+        )
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        images.append(buf.getvalue())
+    doc.close()
+    return images
+
+
 def _resolve_input_dir(parse_type: str) -> Path:
     """Resolve input directory from parse_type."""
-    if parse_type == "pdf":
+    if parse_type in ("pdf", "jpg"):
         return FILES_DIR / "pdf"
     return FILES_DIR / "parsed" / parse_type
 
@@ -182,7 +205,7 @@ def _list_input_files(
     input_dir: Path, parse_type: str
 ) -> list[Path]:
     """List input files for the given parse_type."""
-    if parse_type == "pdf":
+    if parse_type in ("pdf", "jpg"):
         return sorted(input_dir.glob("*.pdf"))
     return sorted(
         list(input_dir.glob("*.md"))
@@ -195,6 +218,7 @@ def extract_with_gemini(
     stem: str,
     text: str | None = None,
     pdf_path: Path | None = None,
+    images: list[bytes] | None = None,
     model_name: str = "gemini-2.5-pro",
     xml_dir: Path = XML_DIR,
 ) -> ExtractionResult:
@@ -206,7 +230,15 @@ def extract_with_gemini(
     schema_json = _resolve_schema(stem, xml_dir)
     schema = json.loads(schema_json)
 
-    if pdf_path is not None:
+    if images is not None:
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        parts = [
+            types.Part.from_bytes(
+                data=img, mime_type="image/jpeg"
+            )
+            for img in images
+        ] + [types.Part(text=prompt)]
+    elif pdf_path is not None:
         prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
         parts = [
             types.Part.from_bytes(
@@ -269,6 +301,7 @@ def extract_with_claude(
     stem: str,
     text: str | None = None,
     pdf_path: Path | None = None,
+    images: list[bytes] | None = None,
     model_name: str = "anthropic.claude-sonnet-4-20250514-v1:0",
     region: str = "us-east-1",
     xml_dir: Path = XML_DIR,
@@ -283,12 +316,27 @@ def extract_with_claude(
     schema_json = _resolve_schema(stem, xml_dir)
     schema = json.loads(schema_json)
 
-    if pdf_path is not None:
+    if images is not None:
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        initial_content: list = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(
+                        img
+                    ).decode("ascii"),
+                },
+            }
+            for img in images
+        ] + [{"type": "text", "text": prompt}]
+    elif pdf_path is not None:
         prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
         pdf_b64 = base64.standard_b64encode(
             pdf_path.read_bytes()
         ).decode("ascii")
-        initial_content: list = [
+        initial_content = [
             {
                 "type": "document",
                 "source": {
@@ -366,6 +414,7 @@ def process_file(
     llm: Literal["gemini", "claude"],
     output_dir: Path,
     xml_dir: Path = XML_DIR,
+    parse_type: str = "pdf",
 ) -> ExtractionResult:
     """Extract boring info from a single file.
 
@@ -374,6 +423,7 @@ def process_file(
         llm: LLM to use.
         output_dir: Directory to save results.
         xml_dir: Directory containing XML files for schema generation.
+        parse_type: Input parse type.
 
     Returns:
         Extraction result with data and token usage.
@@ -385,7 +435,17 @@ def process_file(
 
     start_time = time.monotonic()
 
-    if is_pdf:
+    if is_pdf and parse_type == "jpg":
+        images = _pdf_to_images(file_path)
+        if llm == "gemini":
+            result = extract_with_gemini(
+                stem, images=images, **kwargs
+            )
+        else:
+            result = extract_with_claude(
+                stem, images=images, **kwargs
+            )
+    elif is_pdf:
         if llm == "gemini":
             result = extract_with_gemini(
                 stem, pdf_path=file_path, **kwargs
@@ -477,6 +537,7 @@ if __name__ == "__main__":
                 llm=args.llm,
                 output_dir=output_dir,
                 xml_dir=xml_dir,
+                parse_type=args.parse_type,
             )
             total_input += result.usage.input_tokens
             total_output += result.usage.output_tokens

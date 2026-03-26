@@ -89,6 +89,9 @@ uv run python -m kajima.parse_pdf kajima/files/pdf/ --limit 5
 # PDFを直接Geminiに渡す（デフォルト: --parse-type pdf, --llm gemini）
 uv run python -m kajima.extract_llm
 
+# PDFをJPG画像に変換してからLLMに渡す
+uv run python -m kajima.extract_llm --parse-type jpg
+
 # パース済みテキストから（Gemini）
 uv run python -m kajima.extract_llm --parse-type pymupdf --llm gemini
 
@@ -109,13 +112,13 @@ uv run python -m kajima.extract_llm --xml-dir kajima/files/xml
 
 | フラグ | 説明 | デフォルト |
 |---|---|---|
-| `--parse-type` | 入力タイプ（`pdf`, `pymupdf`, `markdown`, `html`, `pymupdf_html`） | `pdf` |
+| `--parse-type` | 入力タイプ（`pdf`, `jpg`, `pymupdf`, `markdown`, `html`, `pymupdf_html`） | `pdf` |
 | `--llm` | 使用するLLM（`gemini`, `claude`） | `gemini` |
 | `--model` | モデル名を上書き | Gemini: `gemini-2.5-flash`, Claude: `anthropic.claude-sonnet-4-20250514-v1:0` |
 | `--limit` | 処理するファイル数（0=全件） | `0` |
 | `--xml-dir` | XMLディレクトリ | `kajima/files/xml` |
 
-入力先: `kajima/files/pdf/`（parse-type=pdf）または `kajima/files/parsed/<parse_type>/`
+入力先: `kajima/files/pdf/`（parse-type=pdf/jpg）または `kajima/files/parsed/<parse_type>/`
 出力先: `kajima/files/results_{model}/{parse_type}/` に `{ファイル名}.json` として保存。
 
 ### Step 3: 精度評価
