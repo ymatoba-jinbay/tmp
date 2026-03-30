@@ -1,23 +1,24 @@
 """Evaluate LLM extraction results against XML ground truth."""
 
-import io
 import json
 import re
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
+from kajima.extract_llm import PARSE_TYPES
 from kajima.parse_xml import parse_xml
 
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "position", "pymupdf4llm", "html", "pymupdf", "jpg"]
-
 
 def _normalize(value: str) -> str:
     """Normalize a value for comparison."""
-    return unicodedata.normalize("NFKC", value).strip()
+    value = unicodedata.normalize("NFKC", value).strip()
+    # 空白・括弧類（半角/全角）を除去して比較精度を上げる
+    value = re.sub(r"[\s()\[\]{}（）［］｛｝【】「」『』〈〉《》〔〕]", "", value)
+    return value
 
 
 def _flatten(

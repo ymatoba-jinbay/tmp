@@ -1,5 +1,7 @@
 """Extract text from PDF and save to file."""
 
+import re
+import unicodedata
 from enum import Enum
 from pathlib import Path
 
@@ -93,14 +95,103 @@ def _extract_with_position(pdf_path: Path) -> str:
             grouped = _group_vertical_words(words)
             grouped.sort(key=lambda w: (w["top"], w["x0"]))
             for w in grouped:
-                d = "V" if w.get("direction") == "vertical" else "H"
                 lines.append(
-                    f"[{d} "
-                    f"x={w['x0']:.0f},"
+                    f"[x={w['x0']:.0f},"
                     f"y={w['top']:.0f}] "
                     f"{w['text']}"
                 )
         return "\n".join(lines)
+
+
+def _build_spatial_text(position_text: str, page_width: float = 595.0) -> str:
+    """座標情報付きテキストから、座標に基づいて空間配置したテキストを生成する。
+
+    x座標を文字カラム位置に変換し、y座標でソートして行ごとにテキストを配置する。
+    """
+
+    # x座標→カラム位置の変換倍率（PDF座標をテキスト幅に変換）
+    col_scale = 120.0 / page_width  # 120文字幅に収める
+    y_line_height = 8.0  # この間隔以内のy座標は同じ行とみなす
+
+    pages_output = []
+    current_entries: list[tuple[float, float, str]] = []
+    current_page_header = ""
+
+    for line in position_text.split("\n"):
+        if line.startswith("=== Page"):
+            if current_entries:
+                pages_output.append(
+                    _render_spatial_page(
+                        current_page_header, current_entries,
+                        col_scale, y_line_height,
+                    )
+                )
+                current_entries = []
+            current_page_header = line
+            continue
+
+        m = re.match(r"\[x=(\d+),y=(\d+)\]\s(.*)", line)
+        if m:
+            x = float(m.group(1))
+            y = float(m.group(2))
+            text = m.group(3)
+            current_entries.append((x, y, text))
+
+    if current_entries:
+        pages_output.append(
+            _render_spatial_page(
+                current_page_header, current_entries,
+                col_scale, y_line_height,
+            )
+        )
+
+    return "\n".join(pages_output)
+
+
+def _render_spatial_page(
+    header: str,
+    entries: list[tuple[float, float, str]],
+    col_scale: float,
+    y_line_height: float,
+) -> str:
+    """1ページ分のエントリを空間配置してテキストに変換する。"""
+    entries.sort(key=lambda e: (e[1], e[0]))
+
+    lines = [header]
+    row_entries: list[tuple[float, str]] = []
+    current_y = entries[0][1] if entries else 0
+
+    for x, y, text in entries:
+        if y - current_y > y_line_height and row_entries:
+            lines.append(_render_row(row_entries, col_scale))
+            row_entries = []
+            current_y = y
+        row_entries.append((x, text))
+
+    if row_entries:
+        lines.append(_render_row(row_entries, col_scale))
+
+    return "\n".join(lines)
+
+
+def _render_row(
+    entries: list[tuple[float, str]], col_scale: float,
+) -> str:
+    """同じ行のエントリをx座標に基づいてスペースで配置する。"""
+    entries.sort(key=lambda e: e[0])
+    buf = []
+    current_col = 0
+    for x, text in entries:
+        target_col = int(x * col_scale)
+        if target_col > current_col:
+            buf.append(" " * (target_col - current_col))
+        buf.append(text)
+        text_width = sum(
+            2 if unicodedata.east_asian_width(c) in ("F", "W") else 1
+            for c in text
+        )
+        current_col = max(target_col + text_width, current_col + text_width)
+    return "".join(buf)
 
 
 def _extract_with_markdown(pdf_path: Path) -> str:
@@ -282,6 +373,15 @@ def parse_and_save(
     output_path = output_dir / f"{pdf_path.stem}{suffix}"
     output_path.write_text(text, encoding="utf-8")
     print(f"Saved: {output_path}")
+
+    if extraction_type == ExtractionType.POSITION:
+        spatial_dir = output_dir.parent / "position_spatial"
+        spatial_dir.mkdir(parents=True, exist_ok=True)
+        spatial_text = _build_spatial_text(text)
+        spatial_path = spatial_dir / f"{pdf_path.stem}.txt"
+        spatial_path.write_text(spatial_text, encoding="utf-8")
+        print(f"Saved: {spatial_path}")
+
     return output_path
 
 
