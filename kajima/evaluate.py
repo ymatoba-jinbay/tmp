@@ -388,7 +388,8 @@ if __name__ == "__main__":
         "--parse-type",
         choices=PARSE_TYPES + ["all"],
         default="pdf",
-        help="Input parse type (default: pdf, 'all' to run all types found in results dir)",
+        help="Input parse type (default: pdf, "
+        "'all' to run all types found in results dir)",
     )
     parser.add_argument(
         "--llm",

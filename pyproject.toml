@@ -26,6 +26,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+per-file-ignores = {"kajima/extract_llm.py" = ["E501"]}
 
 [tool.pyright]
 pythonVersion = "3.11"

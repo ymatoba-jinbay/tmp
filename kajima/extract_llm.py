@@ -108,7 +108,10 @@ JSONのみを出力してください。"""
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 
-PARSE_TYPES = ["pdf", "jpg", "position", "position_spatial", "pymupdf4llm", "html", "pymupdf"]
+PARSE_TYPES = [
+    "pdf", "jpg", "position", "position_spatial",
+    "pymupdf4llm", "html", "pymupdf",
+]
 MAX_RETRIES = 2
 
 _gemini_client = None
@@ -636,7 +639,7 @@ if __name__ == "__main__":
     print(f"Input tokens:  {total_input:,}")
     print(f"Output tokens: {total_output:,}")
     print(f"Total tokens:  {total_input + total_output:,}")
-    print(f"\n=== Elapsed Time ===")
+    print("\n=== Elapsed Time ===")
     print(f"Total: {total_elapsed:.1f}s")
 
     # Explicitly delete cached clients to avoid ImportError at shutdown

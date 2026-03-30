@@ -1,8 +1,9 @@
 """PDFから文字の重なりがないファイルを選定するスクリプト"""
 
-import fitz
 import sys
 from pathlib import Path
+
+import fitz
 
 
 def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
@@ -19,13 +20,14 @@ def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
     with doc:
         for page in doc:
             try:
-                text_dict = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+                flags = fitz.TEXT_PRESERVE_WHITESPACE
+                text_dict = page.get_text("rawdict", flags=flags)
             except Exception:
                 return True
 
             # 各spanのbboxを集める（行・ブロック情報付き）
             spans = []
-            for block in text_dict.get("blocks", []):
+            for block in text_dict.get("blocks", []):  # type: ignore[union-attr]
                 if block.get("type") != 0:
                     continue
                 block_no = block.get("number", 0)
@@ -35,7 +37,9 @@ def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
                         if not text.strip():
                             continue
                         bbox = span.get("bbox")
-                        if bbox and (bbox[2] - bbox[0]) > 0.1 and (bbox[3] - bbox[1]) > 0.1:
+                        w = bbox[2] - bbox[0] if bbox else 0
+                        h = bbox[3] - bbox[1] if bbox else 0
+                        if bbox and w > 0.1 and h > 0.1:
                             spans.append({
                                 "bbox": bbox,
                                 "block": block_no,
@@ -56,7 +60,9 @@ def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
                         break
 
                     # 同じブロック・同じ行のspan同士はスキップ
-                    if spans[i]["block"] == spans[j]["block"] and spans[i]["line"] == spans[j]["line"]:
+                    same_block = spans[i]["block"] == spans[j]["block"]
+                    same_line = spans[i]["line"] == spans[j]["line"]
+                    if same_block and same_line:
                         continue
 
                     # y方向の重なり
@@ -83,7 +89,8 @@ def main():
     no_overlap = []
     for i, pdf_path in enumerate(pdf_files):
         if i % 50 == 0:
-            print(f"Processing {i}/{len(pdf_files)}... found {len(no_overlap)} so far", file=sys.stderr)
+            msg = f"Processing {i}/{len(pdf_files)}... found {len(no_overlap)} so far"
+            print(msg, file=sys.stderr)
 
         if not has_text_overlap(str(pdf_path)):
             no_overlap.append(pdf_path.stem)
