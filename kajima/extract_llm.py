@@ -13,100 +13,38 @@ from kajima.parse_xml import build_json_schema, parse_xml
 
 load_dotenv()
 
-_COMMON_INSTRUCTIONS = """\
-# 役割
-あなたは建設会社で働く地盤のプロフェッショナルで、ボーリング調査の結果の理解に優れています。
-以下のcontextに従ってtaskを実行してください。
-回答は日本語で出力してください。
-
-# context
-添付のデータは、ボーリング調査結果の柱状図です。
-内容を確認し、指示に従って、柱状図の内容を解析し、出力形式はformatに記載の内容に限りjson形式で出力してください。
-jsonの項目名は固定です。取得した値の間で矛盾がないか、論理的に検討してください。
-
-# format
-{schema}
-
-# task
-1.  柱状図の内容をすべてを確認する。
-2.  添付されるデータは複数のフォーマットを持つ可能性があるため、以下のルールは柔軟に適用すること。
-3.  特に間違えやすい内容と、フォーマット差を吸収するためのルールを以下に記載します。
-4.  **最終出力前の必須確認事項**: JSON出力前に、「北緯」「東経」の値が以下の条件を満たしているか必ず確認してください：
-    *   値の形式: `"XX° XX' XX.XXXX"` （度・分・秒の形式）
-    *   余計な文字なし: 値の末尾に引用符（`"`）、アポストロフィ（`'`）、その他の記号が余計に付加されていないこと
-    *   カンマの変換: 小数点にカンマ（`,`）が使用されている場合は、ピリオド（`.`）に変換済みであること
-
-    *   **全般:**
-        *   情報が記載されていない項目は、値に空文字列 `""` を設定してください。
-        *   数値はそのまま文字列として返してください。
-
-    *   **表題情報:**
-        *   ヘッダー情報から、各項目名と一致または類似するラベルを探して値を取得します。
-        *   **「事業・工事名」**: 「事業・工事名」と明確にラベル付けされた欄からのみテキストを取得してください。この欄が存在しない、または空欄である場合は、必ず空文字列 `""` を出力してください。隣接する「調査名」欄の値を流用してはいけません。
-        *   **「ボーリング名」**: 「ボーリング名」または「ボーリングNo.」というラベルの欄から取得します。
-        *   **「調査位置」**: 「調査位置」というラベルの欄から取得します。このラベルが見つからない場合は、空文字列 `""` を出力します。
-        *   **「北緯」「東経」の重要な注意事項**:
-            * 「北緯」「東経」欄から値を読み取る際は、**数値と記号のみ**を抽出し、余計な文字（引用符、スペース、その他の記号）は削除してください。
-            * **正しい出力例**: `"XX° XX' XX.XXXX"` （引用符やその他の余計な文字なし）
-            * **誤った出力例**: `"XX° XX' XX.XXXX\\""'''` （末尾に余計な引用符や文字が含まれている）
-            * カンマ（,）が小数点として使用されている場合は、ピリオド（.）に変換してください。
-            * 値の末尾に余計な引用符や文字列が付加されていないか、出力前に必ず確認してください。
-        *   **「調査業者名」**: 「調査業者名」というラベルの欄から取得します。このラベルが見つからない場合は、ヘッダーやフッターに記載されている会社名を取得します。
-        *   **その他項目（調査期間、孔口標高など）**も同様に、対応するラベルの欄から値を取得してください。
-
-    *   **地層情報:**
-        *   **「層開始深度」「層終了深度」**: 柱状図本体の左側にある深度を示す列（例：「深度(m)」）から、各土質区分の境界の値を正確に読み取ってください。
-        *   **「土質区分」**: 主に「土質区分」または「土質名」という見出しの列から取得します。
-        *   **「土質区分_eng」**: 取得した日本語の「土質区分」または「土質名」を地盤工学分野において適切な英語に翻訳して出力します。
-               英訳の適切な単語としては例えば、「Gravel, Sands, Silts, Clays, Fills, Rock」などがあります。
-        *   **「土質シンボル」**: 「土質区分」列内の括弧書き（例: `(VH2-S)`）から取得します。「土質区分」列が見つからない、または括弧書きがない場合は、空文字列 `""` を出力します。
-        *   **「色調」**: 各土質区分の行と水平に並んでいる「色調」列から取得します。複数の色が記載されている場合（例：「黄灰~褐灰」）は、記載通りに結合します。
-        *   **「記事」**: 各記述がどの地層に属するかを以下のロジックで厳密に判断し、対応する地層の「記事」に含めてください。
-            1.  **明示的な深度情報に基づく判定:** 記事内に角括弧や`m付近`といった形式で深度が明示されている場合（例:`[3.50]`, `4m付近`）、その深度が含まれる地層（層開始深度 <= 記述内深度 <= 層終了深度）に割り当てます。境界値に該当する場合は、より浅い層に含めます。
-            2.  **視覚的所属に基づく判定:** 上記で特定できない場合、その記事が水平方向にどの土質区分の行ブロックと視覚的に対応しているかを判断し、その地層に割り当てます。
-            3.  **同一地層内の記述の結合:** 同一地層に割り当てられた複数の記述は、出現順に改行文字 `\\n` で結合し、単一の「記事」データとします。
-
-    *   **標準貫入試験データ:**
-        *   「標準貫入試験」という明確な表区画から抽出してください。
-        *   **「試験開始深度」**: 試験セクション内の深度を示す列（例：「深度(m)」、「貫入深度(m)」）から取得します。
-        *   **「N値」**: 対応する行の「N値」列から数値を取得します。`>`記号が付随している場合は、数値部分のみを取得します（例: `>50` -> `50`）。
-        *   **「試験終了深度」**: `試験終了深度 = 試験開始深度 + (貫入量 / 100)` の式で算出します。`貫入量(cm)`は、以下の優先順位で決定してください。
-            1.  「打撃回数/貫入量(cm)」という形式の列があれば、その分母の値を取得します。
-            2.  上記がない場合で、「N値」列が分数形式（例: `45/30`）で記載されている場合は、その分母の値を取得します。
-
-    *   **孔内水位測定記録:**
-        *   **キーワード探索**: データ全体から**「孔内水位」という文字列**（完全に一致しなくても、この語句を含んでいれば可）を探します。
-        *   **値の特定**: 上記で見つかった「孔内水位」という文字列の近くで、まずは「測定日」（例：`YYYY-MM-DD`または`MM/DD`形式）を特定し、測定日の表記直下、かつ同じ列に記載されている数値（「X.XX」形式（小数点以下2桁））を「孔内水位」として取得してください。
-        *   **最終決定**:
-            *   候補が複数見つかった場合は、専用の欄の見出しの直下にある値です。
-            *   候補が1つしか見つからない場合は、その値を孔内水位として採用します。
-        *   **除外ルール**: 「備考」欄などに記載されている**「泥水水位」**というキーワードに関連する数値は、孔内水位ではないため、常に除外します。
-
-JSONのみを出力してください。説明は不要です。"""
-
-EXTRACTION_PROMPT = """\
-以下はボーリング柱状図PDFから抽出されたテキストです。
-
-テキスト:
-{text}
-
-""" + _COMMON_INSTRUCTIONS
-
-PDF_EXTRACTION_PROMPT = _COMMON_INSTRUCTIONS
-
-RETRY_PROMPT = """\
-前回の出力に以下のエラーがありました。修正して再度JSONのみを出力してください。
-
-エラー:
-{errors}
-
-出力するJSONスキーマ:
-{schema}
-
-JSONのみを出力してください。"""
-
 FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
+PROMPTS_DIR = FILES_DIR / "prompts"
+
+# --- スキーマモード切り替え ---
+# "xml": XMLから動的に生成したJSON Schemaを使用（schemalessプロンプト）
+# "fixed": 共有コードの固定フォーマットを使用（フルプロンプト）
+SCHEMA_MODE: Literal["xml", "fixed"] = "xml"
+
+
+def _load_prompt(name: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    return (PROMPTS_DIR / name).read_text(encoding="utf-8").rstrip("\n")
+
+
+# プロンプトファイル一覧:
+#   common_instructions.txt          - 固定スキーマ用（キー名指定の詳細ルール付き）
+#   common_instructions_schemaless.txt - XMLスキーマ用（キー名非依存の汎用ルール）
+#   fixed_schema.txt                 - 共有コードの固定JSONフォーマット
+#   text_prefix.txt                  - テキスト入力時のプレフィックス
+#   retry.txt                        - リトライプロンプト
+_PROMPT_FILE = {
+    "xml": "common_instructions_schemaless.txt",
+    "fixed": "common_instructions.txt",
+}
+_COMMON_INSTRUCTIONS = _load_prompt(_PROMPT_FILE[SCHEMA_MODE])
+_TEXT_PREFIX = _load_prompt("text_prefix.txt")
+_FIXED_SCHEMA = _load_prompt("fixed_schema.txt")
+
+EXTRACTION_PROMPT = _TEXT_PREFIX + "\n" + _COMMON_INSTRUCTIONS
+PDF_EXTRACTION_PROMPT = _COMMON_INSTRUCTIONS
+RETRY_PROMPT = _load_prompt("retry.txt")
 
 PARSE_TYPES = [
     "pdf", "jpg", "position", "position_spatial",
@@ -163,15 +101,23 @@ class ExtractionResult:
     elapsed_seconds: float = 0.0
 
 
-def _resolve_schema(stem: str, xml_dir: Path) -> str:
-    """Build a JSON schema string from the corresponding XML file."""
+def _resolve_schema(stem: str, xml_dir: Path) -> tuple[str, dict | None]:
+    """Build a schema string based on SCHEMA_MODE.
+
+    Returns:
+        A tuple of (schema_text_for_prompt, json_schema_for_validation).
+        json_schema_for_validation is None when SCHEMA_MODE is "fixed".
+    """
+    if SCHEMA_MODE == "fixed":
+        return _FIXED_SCHEMA, None
+
     xml_path = xml_dir / f"{stem}.xml"
     if not xml_path.exists():
         msg = f"Corresponding XML not found: {xml_path}"
         raise FileNotFoundError(msg)
     data = parse_xml(xml_path)
     schema = build_json_schema(data)
-    return json.dumps(schema, ensure_ascii=False, indent=2)
+    return json.dumps(schema, ensure_ascii=False, indent=2), schema
 
 
 def _validate_schema(data: dict, schema: dict) -> None:
@@ -215,14 +161,16 @@ def _strip_markdown_fences(text: str) -> str:
 
 
 def _parse_and_validate(
-    result_text: str, schema: dict
+    result_text: str, schema: dict | None
 ) -> dict:
     """Parse JSON text and validate against schema.
 
     Raises json.JSONDecodeError or ValueError on failure.
+    When schema is None (fixed mode), only JSON parsing is performed.
     """
     data = json.loads(result_text)
-    _validate_schema(data, schema)
+    if schema is not None:
+        _validate_schema(data, schema)
     return data
 
 
@@ -316,11 +264,10 @@ def extract_with_gemini(
 
     client = get_gemini_client()
 
-    schema_json = _resolve_schema(stem, xml_dir)
-    schema = json.loads(schema_json)
+    schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
         parts = [
             types.Part.from_bytes(
                 data=img, mime_type="image/jpeg"
@@ -328,7 +275,7 @@ def extract_with_gemini(
             for img in images
         ] + [types.Part(text=prompt)]
     elif pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
         parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
@@ -338,7 +285,7 @@ def extract_with_gemini(
         ]
     else:
         prompt = EXTRACTION_PROMPT.format(
-            schema=schema_json, text=text
+            schema=schema_text, text=text
         )
         parts = [types.Part(text=prompt)]
 
@@ -348,7 +295,7 @@ def extract_with_gemini(
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
             retry_prompt = RETRY_PROMPT.format(
-                errors=last_error, schema=schema_json
+                errors=last_error, schema=schema_text
             )
             parts = [types.Part(text=retry_prompt)]
             print(f"    Retry {attempt}/{MAX_RETRIES}")
@@ -402,11 +349,10 @@ def extract_with_claude(
 
     client = get_claude_client(region)
 
-    schema_json = _resolve_schema(stem, xml_dir)
-    schema = json.loads(schema_json)
+    schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
         initial_content: list = [
             {
                 "type": "image",
@@ -421,7 +367,7 @@ def extract_with_claude(
             for img in images
         ] + [{"type": "text", "text": prompt}]
     elif pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_json)
+        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
         pdf_b64 = base64.standard_b64encode(
             pdf_path.read_bytes()
         ).decode("ascii")
@@ -441,7 +387,7 @@ def extract_with_claude(
             {
                 "type": "text",
                 "text": EXTRACTION_PROMPT.format(
-                    schema=schema_json, text=text
+                    schema=schema_text, text=text
                 ),
             }
         ]
@@ -456,7 +402,7 @@ def extract_with_claude(
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
             retry_prompt = RETRY_PROMPT.format(
-                errors=last_error, schema=schema_json
+                errors=last_error, schema=schema_text
             )
             messages = [
                 *messages,
