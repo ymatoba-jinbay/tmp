@@ -520,39 +520,25 @@ def process_file(
     stem = file_path.stem
     is_pdf = file_path.suffix.lower() == ".pdf"
 
+    extract_fn = (
+        extract_with_gemini if llm == "gemini"
+        else extract_with_claude
+    )
     kwargs: dict = {"xml_dir": xml_dir}
 
     start_time = time.monotonic()
 
     if is_pdf and parse_type == "jpg":
-        images = _pdf_to_images(file_path)
-        if llm == "gemini":
-            result = extract_with_gemini(
-                stem, images=images, **kwargs
-            )
-        else:
-            result = extract_with_claude(
-                stem, images=images, **kwargs
-            )
+        result = extract_fn(
+            stem, images=_pdf_to_images(file_path), **kwargs
+        )
     elif is_pdf:
-        if llm == "gemini":
-            result = extract_with_gemini(
-                stem, pdf_path=file_path, **kwargs
-            )
-        else:
-            result = extract_with_claude(
-                stem, pdf_path=file_path, **kwargs
-            )
+        result = extract_fn(
+            stem, pdf_path=file_path, **kwargs
+        )
     else:
         text = file_path.read_text(encoding="utf-8")
-        if llm == "gemini":
-            result = extract_with_gemini(
-                stem, text=text, **kwargs
-            )
-        else:
-            result = extract_with_claude(
-                stem, text=text, **kwargs
-            )
+        result = extract_fn(stem, text=text, **kwargs)
 
     result.elapsed_seconds = time.monotonic() - start_time
 

@@ -17,6 +17,25 @@ class ExtractionType(str, Enum):
     PYMUPDF = "pymupdf"
 
 
+def _flush_vertical_group(
+    current: list[dict],
+    vertical_words: list[dict],
+    remaining_singles: list[dict],
+) -> None:
+    """Flush a group of single-char words into vertical or remaining."""
+    if len(current) > 1:
+        vertical_words.append({
+            "text": "".join(c["text"] for c in current),
+            "x0": min(c["x0"] for c in current),
+            "top": current[0]["top"],
+            "x1": max(c["x1"] for c in current),
+            "bottom": current[-1]["bottom"],
+            "direction": "vertical",
+        })
+    else:
+        remaining_singles.append(current[0])
+
+
 def _group_vertical_words(
     words: list[dict],
     x_tolerance: float = 3.0,
@@ -49,31 +68,13 @@ def _group_vertical_words(
             if w["top"] - prev["bottom"] < y_gap_max:
                 current.append(w)
             else:
-                if len(current) > 1:
-                    vertical_words.append({
-                        "text": "".join(
-                            c["text"] for c in current
-                        ),
-                        "x0": min(c["x0"] for c in current),
-                        "top": current[0]["top"],
-                        "x1": max(c["x1"] for c in current),
-                        "bottom": current[-1]["bottom"],
-                        "direction": "vertical",
-                    })
-                else:
-                    remaining_singles.append(current[0])
+                _flush_vertical_group(
+                    current, vertical_words, remaining_singles
+                )
                 current = [w]
-        if len(current) > 1:
-            vertical_words.append({
-                "text": "".join(c["text"] for c in current),
-                "x0": min(c["x0"] for c in current),
-                "top": current[0]["top"],
-                "x1": max(c["x1"] for c in current),
-                "bottom": current[-1]["bottom"],
-                "direction": "vertical",
-            })
-        else:
-            remaining_singles.append(current[0])
+        _flush_vertical_group(
+            current, vertical_words, remaining_singles
+        )
 
     return multi_chars + remaining_singles + vertical_words
 

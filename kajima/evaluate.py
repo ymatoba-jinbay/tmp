@@ -6,11 +6,8 @@ import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
-from kajima.extract_llm import PARSE_TYPES
+from kajima.extract_llm import FILES_DIR, PARSE_TYPES, XML_DIR
 from kajima.parse_xml import parse_xml
-
-FILES_DIR = Path(__file__).resolve().parent / "files"
-XML_DIR = FILES_DIR / "xml"
 
 
 def _normalize(value: str) -> str:
@@ -334,35 +331,24 @@ def _print_summary(summary: dict, file=None) -> None:
 
     section_analysis = summary["section_analysis"]
 
-    _p("\nSection analysis (top-level):")
-    for section, stats in section_analysis["top"].items():
-        if stats["evaluated"] == 0:
-            continue
-        _p(
-            f"  {section}: "
-            f"{stats['precision']:.0%} "
-            f"({stats['correct']}/{stats['evaluated']})"
-            + (
-                f"  errors: {dict(stats['error_types'])}"
-                if stats["error_types"]
-                else ""
+    for label, key in [
+        ("top-level", "top"),
+        ("sub-section", "sub"),
+    ]:
+        _p(f"\nSection analysis ({label}):")
+        for section, stats in section_analysis[key].items():
+            if stats["evaluated"] == 0:
+                continue
+            _p(
+                f"  {section}: "
+                f"{stats['precision']:.0%} "
+                f"({stats['correct']}/{stats['evaluated']})"
+                + (
+                    f"  errors: {dict(stats['error_types'])}"
+                    if stats["error_types"]
+                    else ""
+                )
             )
-        )
-
-    _p("\nSection analysis (sub-section):")
-    for section, stats in section_analysis["sub"].items():
-        if stats["evaluated"] == 0:
-            continue
-        _p(
-            f"  {section}: "
-            f"{stats['precision']:.0%} "
-            f"({stats['correct']}/{stats['evaluated']})"
-            + (
-                f"  errors: {dict(stats['error_types'])}"
-                if stats["error_types"]
-                else ""
-            )
-        )
 
     worst = sorted(
         summary["per_file"],
