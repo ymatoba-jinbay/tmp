@@ -6,11 +6,12 @@ from pathlib import Path
 import fitz
 
 
-def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
-    """PDFに文字の重なりがあるかチェックする。
+def has_text_overlap(pdf_path: str) -> bool:
+    """PDFに文字の重なりがあるかチェックする（文字単位）。
 
-    各ページで文字単位のbboxを取得し、異なる文字同士でbboxが重なっている
-    ケースを検出する。同じspan内の隣接文字は自然に隣り合うため除外する。
+    異なる行の文字同士が実際に重なっているケースを検出する。
+    完全な二重化（同じ文字が同じ位置に重複）は問題ないのでスキップする。
+    表の隣接行で自然に近接している（重なりはない）ケースは許容する。
     """
     try:
         doc = fitz.open(pdf_path)
@@ -25,63 +26,66 @@ def has_text_overlap(pdf_path: str, tolerance: float = 2.0) -> bool:
             except Exception:
                 return True
 
-            # 各spanのbboxを集める（行・ブロック情報付き）
-            spans = []
+            # 文字単位でbboxを集める（ブロック・行情報付き）
+            chars = []
             for block in text_dict.get("blocks", []):  # type: ignore[union-attr]
                 if block.get("type") != 0:
                     continue
                 block_no = block.get("number", 0)
                 for li, line in enumerate(block.get("lines", [])):
                     for span in line.get("spans", []):
-                        text = span.get("text", "")
-                        if not text.strip():
-                            continue
-                        bbox = span.get("bbox")
-                        w = bbox[2] - bbox[0] if bbox else 0
-                        h = bbox[3] - bbox[1] if bbox else 0
-                        if bbox and w > 0.1 and h > 0.1:
-                            spans.append({
-                                "bbox": bbox,
-                                "block": block_no,
-                                "line": li,
-                            })
+                        for ch in span.get("chars", []):
+                            c = ch.get("c", "")
+                            bbox = ch.get("bbox")
+                            if not c.strip() or not bbox:
+                                continue
+                            w = bbox[2] - bbox[0]
+                            h = bbox[3] - bbox[1]
+                            if w > 0.1 and h > 0.1:
+                                chars.append((c, bbox, block_no, li))
 
             # y座標でソート
-            spans.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
+            chars.sort(key=lambda s: (s[1][1], s[1][0]))
 
-            overlap_count = 0
-            for i in range(len(spans)):
-                bi = spans[i]["bbox"]
-                for j in range(i + 1, len(spans)):
-                    bj = spans[j]["bbox"]
+            for i in range(len(chars)):
+                ci, bi, bni, lni = chars[i]
+                for j in range(i + 1, len(chars)):
+                    cj, bj, bnj, lnj = chars[j]
 
-                    # y方向が離れすぎたらbreak
-                    if bj[1] > bi[3] + tolerance:
+                    # y方向が離れたらbreak
+                    if bj[1] > bi[3] + 0.5:
                         break
 
-                    # 同じブロック・同じ行のspan同士はスキップ
-                    same_block = spans[i]["block"] == spans[j]["block"]
-                    same_line = spans[i]["line"] == spans[j]["line"]
-                    if same_block and same_line:
+                    # 同じブロック・同じ行の文字同士はスキップ
+                    if bni == bnj and lni == lnj:
                         continue
 
-                    # y方向の重なり
-                    y_overlap = min(bi[3], bj[3]) - max(bi[1], bj[1])
-                    if y_overlap <= tolerance:
-                        continue
-
-                    # x方向の重なり
+                    # x方向の重なりチェック
                     x_overlap = min(bi[2], bj[2]) - max(bi[0], bj[0])
-                    if x_overlap > tolerance:
-                        overlap_count += 1
-                        if overlap_count >= 3:  # 3箇所以上の重なりで判定
-                            return True
+                    if x_overlap <= 0:
+                        continue
+
+                    # y方向の重なりチェック
+                    y_overlap = min(bi[3], bj[3]) - max(bi[1], bj[1])
+                    if y_overlap <= 0:
+                        continue
+
+                    # 完全な二重化（同じ文字・同じ位置）はスキップ
+                    if ci == cj:
+                        dx = abs(bi[0] - bj[0]) + abs(bi[2] - bj[2])
+                        dy = abs(bi[1] - bj[1]) + abs(bi[3] - bj[3])
+                        if dx < 0.5 and dy < 0.5:
+                            continue
+
+                    # ここに到達 = 異なる行の文字が x, y 両方で重なっている
+                    return True
 
     return False
 
 
 def main():
     pdf_dir = Path(__file__).parent / "files" / "pdf"
+    out_path = Path(__file__).parent / "files" / "test_filenames.txt"
     pdf_files = sorted(pdf_dir.glob("*.pdf"))
 
     print(f"Total PDF files: {len(pdf_files)}", file=sys.stderr)
@@ -100,8 +104,8 @@ def main():
 
     print(f"Found {len(no_overlap)} files without overlap", file=sys.stderr)
 
-    for name in no_overlap:
-        print(name)
+    out_path.write_text("\n".join(no_overlap) + "\n")
+    print(f"Written to {out_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

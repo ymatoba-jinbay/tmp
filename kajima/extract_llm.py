@@ -22,33 +22,52 @@ PROMPTS_DIR = FILES_DIR / "prompts"
 # "fixed": 共有コードの固定フォーマットを使用（フルプロンプト）
 SCHEMA_MODE: Literal["xml", "fixed"] = "xml"
 
+# --- プロンプト切り替え ---
+# プロンプトファイル名（拡張子なし）。コマンドラインの --prompt で上書き可能。
+PROMPT_NAME: str | None = None
+
+# プロンプトファイル一覧:
+#   common_instructions.txt          - 固定スキーマ用（キー名指定の詳細ルール付き）
+#   common_instructions_schemaless.txt - XMLスキーマ用（キー名非依存の汎用ルール）
+#   simple_schemaless.txt            - シンプル版（初期プロンプトベース）
+#   balanced_schemaless.txt          - バランス版（有用ルール＋自信なしは空文字）
+#   fixed_schema.txt                 - 共有コードの固定JSONフォーマット
+#   text_prefix.txt                  - テキスト入力時のプレフィックス
+#   retry.txt                        - リトライプロンプト
+_DEFAULT_PROMPT_FILE = {
+    "xml": "simple_schemaless.txt",
+    "fixed": "common_instructions.txt",
+}
+
 
 def _load_prompt(name: str) -> str:
     """Load a prompt template from the prompts directory."""
     return (PROMPTS_DIR / name).read_text(encoding="utf-8").rstrip("\n")
 
 
-# プロンプトファイル一覧:
-#   common_instructions.txt          - 固定スキーマ用（キー名指定の詳細ルール付き）
-#   common_instructions_schemaless.txt - XMLスキーマ用（キー名非依存の汎用ルール）
-#   fixed_schema.txt                 - 共有コードの固定JSONフォーマット
-#   text_prefix.txt                  - テキスト入力時のプレフィックス
-#   retry.txt                        - リトライプロンプト
-_PROMPT_FILE = {
-    "xml": "common_instructions_schemaless.txt",
-    "fixed": "common_instructions.txt",
-}
-_COMMON_INSTRUCTIONS = _load_prompt(_PROMPT_FILE[SCHEMA_MODE])
-_TEXT_PREFIX = _load_prompt("text_prefix.txt")
-_FIXED_SCHEMA = _load_prompt("fixed_schema.txt")
+def _load_prompts() -> tuple[str, str, str]:
+    """Load prompt templates based on current settings."""
+    if PROMPT_NAME:
+        prompt_file = f"{PROMPT_NAME}.txt"
+    else:
+        prompt_file = _DEFAULT_PROMPT_FILE[SCHEMA_MODE]
+    common = _load_prompt(prompt_file)
+    text_prefix = _load_prompt("text_prefix.txt")
+    retry = _load_prompt("retry.txt")
+    return common, text_prefix, retry
 
-EXTRACTION_PROMPT = _TEXT_PREFIX + "\n" + _COMMON_INSTRUCTIONS
-PDF_EXTRACTION_PROMPT = _COMMON_INSTRUCTIONS
-RETRY_PROMPT = _load_prompt("retry.txt")
+
+def _get_prompts() -> tuple[str, str, str]:
+    """Get (EXTRACTION_PROMPT, PDF_EXTRACTION_PROMPT, RETRY_PROMPT)."""
+    common, text_prefix, retry = _load_prompts()
+    return text_prefix + "\n" + common, common, retry
+
+
+_FIXED_SCHEMA = _load_prompt("fixed_schema.txt")
 
 PARSE_TYPES = [
     "pdf", "jpg", "position", "position_spatial",
-    "pymupdf4llm", "html", "pymupdf",
+    "pymupdf4llm", "pymupdf",
 ]
 MAX_RETRIES = 2
 
@@ -263,11 +282,12 @@ def extract_with_gemini(
     from google.genai import types
 
     client = get_gemini_client()
+    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
+        prompt = pdf_prompt.format(schema=schema_text)
         parts = [
             types.Part.from_bytes(
                 data=img, mime_type="image/jpeg"
@@ -275,7 +295,7 @@ def extract_with_gemini(
             for img in images
         ] + [types.Part(text=prompt)]
     elif pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
+        prompt = pdf_prompt.format(schema=schema_text)
         parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
@@ -284,7 +304,7 @@ def extract_with_gemini(
             types.Part(text=prompt),
         ]
     else:
-        prompt = EXTRACTION_PROMPT.format(
+        prompt = extraction_prompt.format(
             schema=schema_text, text=text
         )
         parts = [types.Part(text=prompt)]
@@ -294,7 +314,7 @@ def extract_with_gemini(
 
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
-            retry_prompt = RETRY_PROMPT.format(
+            retry_prompt = retry_tmpl.format(
                 errors=last_error, schema=schema_text
             )
             parts = [types.Part(text=retry_prompt)]
@@ -338,7 +358,7 @@ def extract_with_claude(
     text: str | None = None,
     pdf_path: Path | None = None,
     images: list[bytes] | None = None,
-    model_name: str = "anthropic.claude-opus-4-0-20250514-v1:0",
+    model_name: str = "jp.anthropic.claude-sonnet-4-6",
     region: str = "ap-northeast-1",
     xml_dir: Path = XML_DIR,
 ) -> ExtractionResult:
@@ -348,11 +368,12 @@ def extract_with_claude(
     import anthropic
 
     client = get_claude_client(region)
+    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
+        prompt = pdf_prompt.format(schema=schema_text)
         initial_content: list = [
             {
                 "type": "image",
@@ -367,7 +388,7 @@ def extract_with_claude(
             for img in images
         ] + [{"type": "text", "text": prompt}]
     elif pdf_path is not None:
-        prompt = PDF_EXTRACTION_PROMPT.format(schema=schema_text)
+        prompt = pdf_prompt.format(schema=schema_text)
         pdf_b64 = base64.standard_b64encode(
             pdf_path.read_bytes()
         ).decode("ascii")
@@ -386,7 +407,7 @@ def extract_with_claude(
         initial_content = [
             {
                 "type": "text",
-                "text": EXTRACTION_PROMPT.format(
+                "text": extraction_prompt.format(
                     schema=schema_text, text=text
                 ),
             }
@@ -401,7 +422,7 @@ def extract_with_claude(
 
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
-            retry_prompt = RETRY_PROMPT.format(
+            retry_prompt = retry_tmpl.format(
                 errors=last_error, schema=schema_text
             )
             messages = [
@@ -515,6 +536,12 @@ if __name__ == "__main__":
         default="gemini",
     )
     parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Number of files to skip (default: 0)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -525,7 +552,15 @@ if __name__ == "__main__":
         default=None,
         help="XML directory (default: kajima/files/xml)",
     )
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Prompt file name without .txt (e.g. simple_schemaless, balanced_schemaless)",
+    )
     args = parser.parse_args()
+
+    if args.prompt:
+        PROMPT_NAME = args.prompt
 
     xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
 
@@ -537,6 +572,8 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     input_files = _list_input_files(input_dir, args.parse_type)
+    if args.offset > 0:
+        input_files = input_files[args.offset:]
     if args.limit > 0:
         input_files = input_files[: args.limit]
 

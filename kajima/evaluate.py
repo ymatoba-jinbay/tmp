@@ -13,8 +13,12 @@ from kajima.parse_xml import parse_xml
 def _normalize(value: str) -> str:
     """Normalize a value for comparison."""
     value = unicodedata.normalize("NFKC", value).strip()
+    # 各種ハイフン・ダッシュ・マイナス記号を統一
+    value = re.sub(r"[\u2010-\u2015\u2212\uFF0D\uFF70\u30FC]", "-", value)
     # 空白・括弧類（半角/全角）を除去して比較精度を上げる
     value = re.sub(r"[\s()\[\]{}（）［］｛｝【】「」『』〈〉《》〔〕]", "", value)
+    # 区切り文字（読点、カンマ、改行）をソートして比較できるよう統一
+    value = re.sub(r"[、,，\n]+", ",", value)
     return value
 
 
@@ -75,6 +79,156 @@ def _classify_error(xml_norm: str, llm_norm: str) -> str:
     return "wrong_value"
 
 
+def _match_arrays(
+    xml_items: list[dict],
+    llm_items: list[dict],
+) -> list[tuple[int, int | None]]:
+    """Match XML array elements to LLM array elements by best field overlap.
+
+    Returns list of (xml_index, llm_index or None) pairs.
+    Each LLM element is used at most once (greedy best-match).
+    """
+    if not xml_items:
+        return []
+
+    used_llm: set[int] = set()
+    matches: list[tuple[int, int | None]] = []
+
+    for xi, x_item in enumerate(xml_items):
+        x_flat = _flatten(x_item)
+        best_j: int | None = None
+        best_score = 0
+
+        for lj, l_item in enumerate(llm_items):
+            if lj in used_llm:
+                continue
+            l_flat = _flatten(l_item)
+            score = sum(
+                1
+                for k, v in x_flat.items()
+                if _normalize(v)
+                and k in l_flat
+                and _normalize(v) == _normalize(l_flat[k])
+            )
+            if score > best_score:
+                best_score = score
+                best_j = lj
+
+        matches.append((xi, best_j))
+        if best_j is not None:
+            used_llm.add(best_j)
+
+    return matches
+
+
+def _compare_values(
+    key: str,
+    xml_value: str,
+    llm_value: str,
+    details: list[dict],
+    counters: dict,
+) -> None:
+    """Compare a single xml vs llm value and update counters/details."""
+    xml_norm = _normalize(xml_value)
+    if not xml_norm:
+        return
+
+    llm_norm = _normalize(llm_value)
+
+    if not llm_norm:
+        counters["not_extracted"] += 1
+        details.append({
+            "field": key,
+            "top_section": _top_section_key(key),
+            "section": _section_key(key),
+            "status": "not_extracted",
+            "xml": xml_value,
+            "llm": "",
+        })
+        return
+
+    if xml_norm == llm_norm:
+        counters["correct"] += 1
+        details.append({
+            "field": key,
+            "top_section": _top_section_key(key),
+            "section": _section_key(key),
+            "status": "correct",
+            "xml": xml_value,
+            "llm": llm_value,
+        })
+    else:
+        counters["incorrect"] += 1
+        error_type = _classify_error(xml_norm, llm_norm)
+        details.append({
+            "field": key,
+            "top_section": _top_section_key(key),
+            "section": _section_key(key),
+            "status": "incorrect",
+            "error_type": error_type,
+            "xml": xml_value,
+            "llm": llm_value,
+        })
+
+
+def _evaluate_recursive(
+    xml_data: object,
+    llm_data: object,
+    prefix: str,
+    details: list[dict],
+    counters: dict,
+) -> None:
+    """Recursively evaluate xml vs llm data with smart array matching."""
+    if isinstance(xml_data, list):
+        llm_list = llm_data if isinstance(llm_data, list) else []
+        # XML/LLM両方がdictのリストならベストマッチ
+        xml_dicts = [
+            x for x in xml_data if isinstance(x, dict)
+        ]
+        llm_dicts = [
+            x for x in llm_list if isinstance(x, dict)
+        ]
+        if xml_dicts and len(xml_dicts) == len(xml_data):
+            matches = _match_arrays(xml_dicts, llm_dicts)
+            for xi, lj in matches:
+                matched_llm = (
+                    llm_dicts[lj] if lj is not None else {}
+                )
+                _evaluate_recursive(
+                    xml_dicts[xi],
+                    matched_llm,
+                    f"{prefix}[{xi}]",
+                    details,
+                    counters,
+                )
+        else:
+            # scalar list: compare by index
+            for i, x_item in enumerate(xml_data):
+                l_item = (
+                    llm_list[i]
+                    if i < len(llm_list)
+                    else None
+                )
+                _evaluate_recursive(
+                    x_item,
+                    l_item,
+                    f"{prefix}[{i}]",
+                    details,
+                    counters,
+                )
+    elif isinstance(xml_data, dict):
+        llm_dict = llm_data if isinstance(llm_data, dict) else {}
+        for k, v in xml_data.items():
+            key = f"{prefix}.{k}" if prefix else k
+            _evaluate_recursive(
+                v, llm_dict.get(k), key, details, counters
+            )
+    else:
+        xml_str = str(xml_data) if xml_data is not None else ""
+        llm_str = str(llm_data) if llm_data is not None else ""
+        _compare_values(prefix, xml_str, llm_str, details, counters)
+
+
 def evaluate_single(
     xml_data: dict,
     llm_data: dict,
@@ -85,65 +239,23 @@ def evaluate_single(
     a non-empty value are scored as correct/incorrect.
     Fields where LLM returned empty are tracked separately as
     not_extracted (may or may not be present in the PDF).
+
+    Array elements are matched by best field overlap, not by index.
     """
-    xml_flat = _flatten(xml_data)
-    llm_flat = _flatten(llm_data)
-
     details: list[dict] = []
-    correct = 0
-    incorrect = 0
-    not_extracted = 0
+    counters = {"correct": 0, "incorrect": 0, "not_extracted": 0}
 
-    for key, xml_value in xml_flat.items():
-        xml_norm = _normalize(xml_value)
-        if not xml_norm:
-            continue
+    _evaluate_recursive(xml_data, llm_data, "", details, counters)
 
-        llm_value = llm_flat.get(key, "")
-        llm_norm = _normalize(llm_value)
-
-        if not llm_norm:
-            not_extracted += 1
-            details.append({
-                "field": key,
-                "top_section": _top_section_key(key),
-                "section": _section_key(key),
-                "status": "not_extracted",
-                "xml": xml_value,
-                "llm": "",
-            })
-            continue
-
-        if xml_norm == llm_norm:
-            correct += 1
-            details.append({
-                "field": key,
-                "top_section": _top_section_key(key),
-                "section": _section_key(key),
-                "status": "correct",
-                "xml": xml_value,
-                "llm": llm_value,
-            })
-        else:
-            incorrect += 1
-            error_type = _classify_error(xml_norm, llm_norm)
-            details.append({
-                "field": key,
-                "top_section": _top_section_key(key),
-                "section": _section_key(key),
-                "status": "incorrect",
-                "error_type": error_type,
-                "xml": xml_value,
-                "llm": llm_value,
-            })
-
-    evaluated = correct + incorrect
-    precision = correct / evaluated if evaluated > 0 else 0.0
+    evaluated = counters["correct"] + counters["incorrect"]
+    precision = (
+        counters["correct"] / evaluated if evaluated > 0 else 0.0
+    )
 
     return {
-        "correct": correct,
-        "incorrect": incorrect,
-        "not_extracted": not_extracted,
+        "correct": counters["correct"],
+        "incorrect": counters["incorrect"],
+        "not_extracted": counters["not_extracted"],
         "evaluated": evaluated,
         "precision": precision,
         "details": details,
