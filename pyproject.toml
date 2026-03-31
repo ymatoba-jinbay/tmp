@@ -43,3 +43,4 @@ override-dependencies = [
     "anthropic>=0.86.0",
     "regex>=2024.4.28",
 ]
+exclude-newer = "1 week"
