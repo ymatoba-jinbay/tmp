@@ -83,6 +83,34 @@ def write_summary_tsvs(
                 )
     print(f"Subsection TSV saved: {sub_path}")
 
+    # Pivot TSV: rows=subsection, columns={llm}_{parse_type}, values=precision
+    pivot_path = output_dir / "evaluation_summary_subsection_pivot.tsv"
+
+    # Collect all column keys and all subsections
+    col_keys: list[str] = []
+    all_sections: set[str] = set()
+    for (llm, pt), s in sorted(summaries.items()):
+        col_keys.append(f"{llm}_{pt}")
+        for section in s.get("section_analysis", {}).get("sub", {}):
+            all_sections.add(section)
+
+    # Build lookup: (section, col_key) -> precision
+    pivot: dict[tuple[str, str], float] = {}
+    for (llm, pt), s in summaries.items():
+        col_key = f"{llm}_{pt}"
+        for section, stats in s.get("section_analysis", {}).get("sub", {}).items():
+            pivot[(section, col_key)] = stats["precision"]
+
+    with open(pivot_path, "w", encoding="utf-8") as f:
+        f.write("sub_section\t" + "\t".join(col_keys) + "\n")
+        for section in sorted(all_sections):
+            vals = [
+                f"{pivot[(section, ck)]:.4f}" if (section, ck) in pivot else ""
+                for ck in col_keys
+            ]
+            f.write(f"{section}\t" + "\t".join(vals) + "\n")
+    print(f"Subsection pivot TSV saved: {pivot_path}")
+
 
 def main() -> None:
     eval_dirs = _find_eval_dirs(FILES_DIR)

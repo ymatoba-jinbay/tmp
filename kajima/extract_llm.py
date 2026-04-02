@@ -17,27 +17,11 @@ FILES_DIR = Path(__file__).resolve().parent / "files"
 XML_DIR = FILES_DIR / "xml"
 PROMPTS_DIR = FILES_DIR / "prompts"
 
-# --- スキーマモード切り替え ---
-# "xml": XMLから動的に生成したJSON Schemaを使用（schemalessプロンプト）
-# "fixed": 共有コードの固定フォーマットを使用（フルプロンプト）
-SCHEMA_MODE: Literal["xml", "fixed"] = "xml"
-
 # --- プロンプト切り替え ---
 # プロンプトファイル名（拡張子なし）。コマンドラインの --prompt で上書き可能。
 PROMPT_NAME: str | None = None
 
-# プロンプトファイル一覧:
-#   common_instructions.txt          - 固定スキーマ用（キー名指定の詳細ルール付き）
-#   common_instructions_schemaless.txt - XMLスキーマ用（キー名非依存の汎用ルール）
-#   simple_schemaless.txt            - シンプル版（初期プロンプトベース）
-#   balanced_schemaless.txt          - バランス版（有用ルール＋自信なしは空文字）
-#   fixed_schema.txt                 - 共有コードの固定JSONフォーマット
-#   text_prefix.txt                  - テキスト入力時のプレフィックス
-#   retry.txt                        - リトライプロンプト
-_DEFAULT_PROMPT_FILE = {
-    "xml": "simple_schemaless.txt",
-    "fixed": "common_instructions.txt",
-}
+_DEFAULT_PROMPT_FILE = "simple_schemaless.txt"
 
 
 def _load_prompt(name: str) -> str:
@@ -45,25 +29,22 @@ def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text(encoding="utf-8").rstrip("\n")
 
 
-def _load_prompts() -> tuple[str, str, str]:
+def _load_prompts() -> tuple[str, str]:
     """Load prompt templates based on current settings."""
     if PROMPT_NAME:
         prompt_file = f"{PROMPT_NAME}.txt"
     else:
-        prompt_file = _DEFAULT_PROMPT_FILE[SCHEMA_MODE]
+        prompt_file = _DEFAULT_PROMPT_FILE
     common = _load_prompt(prompt_file)
     text_prefix = _load_prompt("text_prefix.txt")
-    retry = _load_prompt("retry.txt")
-    return common, text_prefix, retry
+    return common, text_prefix
 
 
-def _get_prompts() -> tuple[str, str, str]:
-    """Get (EXTRACTION_PROMPT, PDF_EXTRACTION_PROMPT, RETRY_PROMPT)."""
-    common, text_prefix, retry = _load_prompts()
-    return text_prefix + "\n" + common, common, retry
+def _get_prompts() -> tuple[str, str]:
+    """Get (EXTRACTION_PROMPT, PDF_EXTRACTION_PROMPT)."""
+    common, text_prefix = _load_prompts()
+    return text_prefix + "\n" + common, common
 
-
-_FIXED_SCHEMA = _load_prompt("fixed_schema.txt")
 
 PARSE_TYPES = [
     "pdf",
@@ -73,7 +54,6 @@ PARSE_TYPES = [
     "pymupdf4llm",
     "pymupdf",
 ]
-MAX_RETRIES = 2
 
 _gemini_client = None
 _claude_client = None
@@ -122,16 +102,12 @@ class ExtractionResult:
     elapsed_seconds: float = 0.0
 
 
-def _resolve_schema(stem: str, xml_dir: Path) -> tuple[str, dict | None]:
-    """Build a schema string based on SCHEMA_MODE.
+def _resolve_schema(stem: str, xml_dir: Path) -> tuple[str, dict]:
+    """Build a JSON Schema from the corresponding XML file.
 
     Returns:
         A tuple of (schema_text_for_prompt, json_schema_for_validation).
-        json_schema_for_validation is None when SCHEMA_MODE is "fixed".
     """
-    if SCHEMA_MODE == "fixed":
-        return _FIXED_SCHEMA, None
-
     xml_path = xml_dir / f"{stem}.xml"
     if not xml_path.exists():
         msg = f"Corresponding XML not found: {xml_path}"
@@ -181,15 +157,13 @@ def _strip_markdown_fences(text: str) -> str:
     return "\n".join(json_lines)
 
 
-def _parse_and_validate(result_text: str, schema: dict | None) -> dict:
+def _parse_and_validate(result_text: str, schema: dict) -> dict:
     """Parse JSON text and validate against schema.
 
     Raises json.JSONDecodeError or ValueError on failure.
-    When schema is None (fixed mode), only JSON parsing is performed.
     """
     data = json.loads(result_text)
-    if schema is not None:
-        _validate_schema(data, schema)
+    _validate_schema(data, schema)
     return data
 
 
@@ -270,18 +244,18 @@ def extract_with_gemini(
     from google.genai import types
 
     client = get_gemini_client()
-    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
+    extraction_prompt, pdf_prompt = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        base_parts = [
+        parts = [
             types.Part.from_bytes(data=img, mime_type="image/jpeg") for img in images
         ] + [types.Part(text=prompt)]
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        base_parts = [
+        parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
                 mime_type="application/pdf",
@@ -289,52 +263,27 @@ def extract_with_gemini(
             types.Part(text=prompt),
         ]
     else:
-        base_parts = [
+        parts = [
             types.Part(text=extraction_prompt.format(schema=schema_text, text=text))
         ]
 
-    total_usage = TokenUsage()
-    last_error = ""
-    result_text = ""
+    response = client.models.generate_content(
+        model=model_name,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+        ),
+    )
 
-    for attempt in range(1 + MAX_RETRIES):
-        parts = list(base_parts)
-        if attempt > 0:
-            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
-            parts.extend(
-                [
-                    types.Part(text="Previous invalid JSON response:"),
-                    types.Part(text=result_text),
-                    types.Part(text=retry_prompt),
-                ]
-            )
-            print(f"    Retry {attempt}/{MAX_RETRIES}")
+    usage = TokenUsage()
+    if response.usage_metadata:
+        usage.input_tokens = response.usage_metadata.prompt_token_count or 0
+        usage.output_tokens = response.usage_metadata.candidates_token_count or 0
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[types.Content(role="user", parts=parts)],
-            config=types.GenerateContentConfig(
-                temperature=0,
-                response_mime_type="application/json",
-            ),
-        )
-
-        if response.usage_metadata:
-            total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
-            total_usage.output_tokens += (
-                response.usage_metadata.candidates_token_count or 0
-            )
-
-        result_text = (response.text or "").strip()
-        try:
-            data = _parse_and_validate(result_text, schema)
-            return ExtractionResult(data=data, usage=total_usage)
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = str(e)
-            if attempt == MAX_RETRIES:
-                raise
-
-    raise RuntimeError("Unreachable")
+    result_text = (response.text or "").strip()
+    data = _parse_and_validate(result_text, schema)
+    return ExtractionResult(data=data, usage=usage)
 
 
 def extract_with_claude(
@@ -352,13 +301,13 @@ def extract_with_claude(
     import anthropic
 
     client = get_claude_client(region)
-    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
+    extraction_prompt, pdf_prompt = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        initial_content: list = [
+        content: list = [
             {
                 "type": "image",
                 "source": {
@@ -372,7 +321,7 @@ def extract_with_claude(
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
         pdf_b64 = base64.standard_b64encode(pdf_path.read_bytes()).decode("ascii")
-        initial_content = [
+        content = [
             {
                 "type": "document",
                 "source": {
@@ -384,52 +333,31 @@ def extract_with_claude(
             {"type": "text", "text": prompt},
         ]
     else:
-        initial_content = [
+        content = [
             {
                 "type": "text",
                 "text": extraction_prompt.format(schema=schema_text, text=text),
             }
         ]
 
-    total_usage = TokenUsage()
-    last_error = ""
-    result_text = ""
-    messages: list = [{"role": "user", "content": initial_content}]
+    response = client.messages.create(
+        model=model_name,
+        max_tokens=8192,
+        messages=[{"role": "user", "content": content}],  # type: ignore[arg-type]
+    )
 
-    for attempt in range(1 + MAX_RETRIES):
-        if attempt > 0:
-            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
-            messages = [
-                *messages,
-                {"role": "assistant", "content": result_text},
-                {"role": "user", "content": retry_prompt},
-            ]
-            print(f"    Retry {attempt}/{MAX_RETRIES}")
+    usage = TokenUsage()
+    usage.input_tokens = response.usage.input_tokens
+    usage.output_tokens = response.usage.output_tokens
 
-        response = client.messages.create(
-            model=model_name,
-            max_tokens=8192,
-            messages=messages,  # type: ignore[arg-type]
-        )
+    first_block = response.content[0]
+    if not isinstance(first_block, anthropic.types.TextBlock):
+        msg = f"Expected TextBlock, got {type(first_block).__name__}"
+        raise TypeError(msg)
+    result_text = _strip_markdown_fences(first_block.text.strip())
 
-        total_usage.input_tokens += response.usage.input_tokens
-        total_usage.output_tokens += response.usage.output_tokens
-
-        first_block = response.content[0]
-        if not isinstance(first_block, anthropic.types.TextBlock):
-            msg = f"Expected TextBlock, got {type(first_block).__name__}"
-            raise TypeError(msg)
-        result_text = _strip_markdown_fences(first_block.text.strip())
-
-        try:
-            data = _parse_and_validate(result_text, schema)
-            return ExtractionResult(data=data, usage=total_usage)
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = str(e)
-            if attempt == MAX_RETRIES:
-                raise
-
-    raise RuntimeError("Unreachable")
+    data = _parse_and_validate(result_text, schema)
+    return ExtractionResult(data=data, usage=usage)
 
 
 def process_file(
@@ -438,7 +366,7 @@ def process_file(
     output_dir: Path,
     xml_dir: Path = XML_DIR,
     parse_type: str = "pdf",
-) -> ExtractionResult:
+) -> ExtractionResult | None:
     """Extract boring info from a single file.
 
     Args:
@@ -449,7 +377,7 @@ def process_file(
         parse_type: Input parse type.
 
     Returns:
-        Extraction result with data and token usage.
+        Extraction result with data and token usage, or None on failure.
     """
     stem = file_path.stem
     is_pdf = file_path.suffix.lower() == ".pdf"
@@ -457,13 +385,19 @@ def process_file(
     extract_fn = extract_with_gemini if llm == "gemini" else extract_with_claude
     start_time = time.monotonic()
 
-    if is_pdf and parse_type == "jpg":
-        result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir)
-    elif is_pdf:
-        result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir)
-    else:
-        text = file_path.read_text(encoding="utf-8")
-        result = extract_fn(stem, text=text, xml_dir=xml_dir)
+    try:
+        if is_pdf and parse_type == "jpg":
+            result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir)
+        elif is_pdf:
+            result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir)
+        else:
+            text = file_path.read_text(encoding="utf-8")
+            result = extract_fn(stem, text=text, xml_dir=xml_dir)
+    except Exception as e:
+        elapsed = time.monotonic() - start_time
+        print(f"  Failed ({elapsed:.1f}s): {e}")
+        _save_error(output_dir, stem, str(e))
+        return None
 
     result.elapsed_seconds = time.monotonic() - start_time
 
@@ -474,6 +408,14 @@ def process_file(
     print(f"  Saved: {output_path}")
 
     return result
+
+
+def _save_error(output_dir: Path, stem: str, error: str) -> None:
+    """Append a failed extraction record to errors.jsonl in the output directory."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    errors_path = output_dir / "errors.jsonl"
+    with open(errors_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"file": stem, "error": error}, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":
@@ -545,20 +487,18 @@ if __name__ == "__main__":
 
     for i, f in enumerate(input_files):
         print(f"[{i + 1}/{len(input_files)}] {f.name}")
-        try:
-            result = process_file(
-                f,
-                llm=args.llm,
-                output_dir=output_dir,
-                xml_dir=xml_dir,
-                parse_type=args.parse_type,
-            )
+        result = process_file(
+            f,
+            llm=args.llm,
+            output_dir=output_dir,
+            xml_dir=xml_dir,
+            parse_type=args.parse_type,
+        )
+        if result is not None:
             total_input += result.usage.input_tokens
             total_output += result.usage.output_tokens
             total_elapsed += result.elapsed_seconds
             print(f"  Time: {result.elapsed_seconds:.1f}s")
-        except Exception as e:
-            print(f"  Error: {e}")
 
     print("\n=== Token Usage ===")
     print(f"Input tokens:  {total_input:,}")
