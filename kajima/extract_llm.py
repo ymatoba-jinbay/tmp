@@ -19,8 +19,8 @@ PROMPTS_DIR = FILES_DIR / "prompts"
 
 # --- プロンプト切り替え ---
 # プロンプトファイル名（拡張子なし）。コマンドラインの --prompt で上書き可能。
-# PROMPT_NAME: str = "simple_schemaless"
-PROMPT_NAME: str = "common_instructions_schemaless"
+PROMPT_NAME: str = "simple_schemaless"
+# PROMPT_NAME: str = "common_instructions_schemaless"
 # PROMPT_NAME: str = "balanced_schemaless"
 
 
