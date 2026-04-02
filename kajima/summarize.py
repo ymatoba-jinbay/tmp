@@ -46,7 +46,8 @@ def write_summary_tsvs(
         f.write(
             "llm\tparse_type\tfiles\tcorrect\tincorrect\t"
             "not_extracted\tevaluated\t"
-            "precision\trecall\tf1\n"
+            "precision\trecall\tf1\t"
+            "total_retries\tretried_files\n"
         )
         for (llm, pt), s in sorted(
             summaries.items(), key=lambda x: x[1]["overall_f1"], reverse=True
@@ -57,7 +58,9 @@ def write_summary_tsvs(
                 f"{s['total_not_extracted']}\t{s['total_evaluated']}\t"
                 f"{s['overall_precision']:.4f}\t"
                 f"{s['overall_recall']:.4f}\t"
-                f"{s['overall_f1']:.4f}\n"
+                f"{s['overall_f1']:.4f}\t"
+                f"{s.get('total_retries', 0)}\t"
+                f"{s.get('retried_files', 0)}\n"
             )
     print(f"Overall TSV saved: {overall_path}")
 

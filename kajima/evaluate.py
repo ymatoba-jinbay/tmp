@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from kajima.collect_labels import _strip_indices, collect_all_labels
-from kajima.extract_llm import FILES_DIR, PARSE_TYPES, XML_DIR
+from kajima.extract_llm import FILES_DIR, XML_DIR
 from kajima.parse_xml import parse_xml
 
 
@@ -496,6 +496,9 @@ def evaluate_batch(
     all_file_results: list[dict] = []
     all_details: list[dict] = []
 
+    total_retries = 0
+    retried_files = 0
+
     for result_file in sorted(result_dir.glob("*.json")):
         stem = result_file.stem
         xml_file = xml_dir / f"{stem}.xml"
@@ -509,8 +512,16 @@ def evaluate_batch(
         with open(result_file, "r", encoding="utf-8") as f:
             llm_data = json.load(f)
 
+        # Extract and remove _metadata before evaluation
+        metadata = llm_data.pop("_metadata", {})
+        retry_count = metadata.get("retry_count", 0)
+        total_retries += retry_count
+        if retry_count > 0:
+            retried_files += 1
+
         result = evaluate_single(xml_data, llm_data, expected_labels)
         result["file"] = stem
+        result["retry_count"] = retry_count
         all_file_results.append(result)
         all_details.extend(result["details"])
 
@@ -549,6 +560,8 @@ def evaluate_batch(
         "overall_precision": overall_metrics["precision"],
         "overall_recall": overall_metrics["recall"],
         "overall_f1": overall_metrics["f1"],
+        "total_retries": total_retries,
+        "retried_files": retried_files,
         "error_type_totals": dict(error_type_totals),
         "section_analysis": section_analysis,
         "incorrect_examples": incorrect_examples,
@@ -584,6 +597,11 @@ def _print_summary(summary: dict, file=None) -> None:
         f"(not extracted: {summary['total_not_extracted']})"
     )
     _p(f"Correct: {summary['total_correct']}  Incorrect: {summary['total_incorrect']}")
+    if summary.get("total_retries", 0) > 0:
+        _p(
+            f"Retries: {summary['total_retries']} total "
+            f"({summary['retried_files']} files)"
+        )
     _p(
         f"Precision: {summary['overall_precision']:.2%}  "
         f"Recall: {summary['overall_recall']:.2%}  "
@@ -645,7 +663,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate LLM extraction accuracy")
     parser.add_argument(
         "--parse-type",
-        choices=PARSE_TYPES + ["all"],
         default="pdf",
         help="Input parse type (default: pdf, "
         "'all' to run all types found in results dir)",

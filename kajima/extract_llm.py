@@ -19,9 +19,9 @@ PROMPTS_DIR = FILES_DIR / "prompts"
 
 # --- プロンプト切り替え ---
 # プロンプトファイル名（拡張子なし）。コマンドラインの --prompt で上書き可能。
-PROMPT_NAME: str | None = None
-
-_DEFAULT_PROMPT_FILE = "simple_schemaless.txt"
+# PROMPT_NAME: str = "simple_schemaless"
+PROMPT_NAME: str = "common_instructions_schemaless"
+# PROMPT_NAME: str = "balanced_schemaless"
 
 
 def _load_prompt(name: str) -> str:
@@ -29,22 +29,22 @@ def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text(encoding="utf-8").rstrip("\n")
 
 
-def _load_prompts() -> tuple[str, str]:
+def _load_prompts() -> tuple[str, str, str]:
     """Load prompt templates based on current settings."""
-    if PROMPT_NAME:
-        prompt_file = f"{PROMPT_NAME}.txt"
-    else:
-        prompt_file = _DEFAULT_PROMPT_FILE
+    prompt_file = f"{PROMPT_NAME}.txt"
     common = _load_prompt(prompt_file)
     text_prefix = _load_prompt("text_prefix.txt")
-    return common, text_prefix
+    retry = _load_prompt("retry.txt")
+    return common, text_prefix, retry
 
 
-def _get_prompts() -> tuple[str, str]:
-    """Get (EXTRACTION_PROMPT, PDF_EXTRACTION_PROMPT)."""
-    common, text_prefix = _load_prompts()
-    return text_prefix + "\n" + common, common
+def _get_prompts() -> tuple[str, str, str]:
+    """Get (EXTRACTION_PROMPT, PDF_EXTRACTION_PROMPT, RETRY_PROMPT)."""
+    common, text_prefix, retry = _load_prompts()
+    return text_prefix + "\n" + common, common, retry
 
+
+MAX_RETRIES = 2
 
 PARSE_TYPES = [
     "pdf",
@@ -100,6 +100,7 @@ class ExtractionResult:
     data: dict = field(default_factory=dict)
     usage: TokenUsage = field(default_factory=TokenUsage)
     elapsed_seconds: float = 0.0
+    retry_count: int = 0
 
 
 def _resolve_schema(stem: str, xml_dir: Path) -> tuple[str, dict]:
@@ -196,8 +197,15 @@ def _resolve_input_dir(parse_type: str) -> Path:
 
 
 def _resolve_output_dir(parse_type: str, llm: str) -> Path:
-    """Resolve output directory."""
-    return FILES_DIR / f"results_{llm}" / parse_type
+    """Resolve output directory.
+
+    When PROMPT_NAME is not the default ("simple_schemaless"),
+    the prompt name is appended to the parse_type folder name.
+    """
+    folder = parse_type
+    if PROMPT_NAME != "simple_schemaless":
+        folder = f"{parse_type}_{PROMPT_NAME}"
+    return FILES_DIR / f"results_{llm}" / folder
 
 
 def _load_test_filenames() -> list[str]:
@@ -244,18 +252,18 @@ def extract_with_gemini(
     from google.genai import types
 
     client = get_gemini_client()
-    extraction_prompt, pdf_prompt = _get_prompts()
+    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        parts = [
+        base_parts = [
             types.Part.from_bytes(data=img, mime_type="image/jpeg") for img in images
         ] + [types.Part(text=prompt)]
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        parts = [
+        base_parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
                 mime_type="application/pdf",
@@ -263,27 +271,52 @@ def extract_with_gemini(
             types.Part(text=prompt),
         ]
     else:
-        parts = [
+        base_parts = [
             types.Part(text=extraction_prompt.format(schema=schema_text, text=text))
         ]
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            temperature=0,
-            response_mime_type="application/json",
-        ),
-    )
+    total_usage = TokenUsage()
+    last_error = ""
+    result_text = ""
 
-    usage = TokenUsage()
-    if response.usage_metadata:
-        usage.input_tokens = response.usage_metadata.prompt_token_count or 0
-        usage.output_tokens = response.usage_metadata.candidates_token_count or 0
+    for attempt in range(1 + MAX_RETRIES):
+        parts = list(base_parts)
+        if attempt > 0:
+            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
+            parts.extend(
+                [
+                    types.Part(text="Previous invalid JSON response:"),
+                    types.Part(text=result_text),
+                    types.Part(text=retry_prompt),
+                ]
+            )
+            print(f"    Retry {attempt}/{MAX_RETRIES}")
 
-    result_text = (response.text or "").strip()
-    data = _parse_and_validate(result_text, schema)
-    return ExtractionResult(data=data, usage=usage)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+        )
+
+        if response.usage_metadata:
+            total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
+            total_usage.output_tokens += (
+                response.usage_metadata.candidates_token_count or 0
+            )
+
+        result_text = (response.text or "").strip()
+        try:
+            data = _parse_and_validate(result_text, schema)
+            return ExtractionResult(data=data, usage=total_usage, retry_count=attempt)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt == MAX_RETRIES:
+                raise
+
+    raise RuntimeError("Unreachable")
 
 
 def extract_with_claude(
@@ -301,13 +334,13 @@ def extract_with_claude(
     import anthropic
 
     client = get_claude_client(region)
-    extraction_prompt, pdf_prompt = _get_prompts()
+    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
 
     schema_text, schema = _resolve_schema(stem, xml_dir)
 
     if images is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        content: list = [
+        initial_content: list = [
             {
                 "type": "image",
                 "source": {
@@ -321,7 +354,7 @@ def extract_with_claude(
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
         pdf_b64 = base64.standard_b64encode(pdf_path.read_bytes()).decode("ascii")
-        content = [
+        initial_content = [
             {
                 "type": "document",
                 "source": {
@@ -333,31 +366,52 @@ def extract_with_claude(
             {"type": "text", "text": prompt},
         ]
     else:
-        content = [
+        initial_content = [
             {
                 "type": "text",
                 "text": extraction_prompt.format(schema=schema_text, text=text),
             }
         ]
 
-    response = client.messages.create(
-        model=model_name,
-        max_tokens=8192,
-        messages=[{"role": "user", "content": content}],  # type: ignore[arg-type]
-    )
+    total_usage = TokenUsage()
+    last_error = ""
+    result_text = ""
+    messages: list = [{"role": "user", "content": initial_content}]
 
-    usage = TokenUsage()
-    usage.input_tokens = response.usage.input_tokens
-    usage.output_tokens = response.usage.output_tokens
+    for attempt in range(1 + MAX_RETRIES):
+        if attempt > 0:
+            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
+            messages = [
+                *messages,
+                {"role": "assistant", "content": result_text},
+                {"role": "user", "content": retry_prompt},
+            ]
+            print(f"    Retry {attempt}/{MAX_RETRIES}")
 
-    first_block = response.content[0]
-    if not isinstance(first_block, anthropic.types.TextBlock):
-        msg = f"Expected TextBlock, got {type(first_block).__name__}"
-        raise TypeError(msg)
-    result_text = _strip_markdown_fences(first_block.text.strip())
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=8192,
+            messages=messages,  # type: ignore[arg-type]
+        )
 
-    data = _parse_and_validate(result_text, schema)
-    return ExtractionResult(data=data, usage=usage)
+        total_usage.input_tokens += response.usage.input_tokens
+        total_usage.output_tokens += response.usage.output_tokens
+
+        first_block = response.content[0]
+        if not isinstance(first_block, anthropic.types.TextBlock):
+            msg = f"Expected TextBlock, got {type(first_block).__name__}"
+            raise TypeError(msg)
+        result_text = _strip_markdown_fences(first_block.text.strip())
+
+        try:
+            data = _parse_and_validate(result_text, schema)
+            return ExtractionResult(data=data, usage=total_usage, retry_count=attempt)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt == MAX_RETRIES:
+                raise
+
+    raise RuntimeError("Unreachable")
 
 
 def process_file(
@@ -403,9 +457,15 @@ def process_file(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{stem}.json"
+    output_data = {
+        "_metadata": {"retry_count": result.retry_count},
+        **result.data,
+    }
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(result.data, f, ensure_ascii=False, indent=2)
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
     print(f"  Saved: {output_path}")
+    if result.retry_count > 0:
+        print(f"  Retries: {result.retry_count}")
 
     return result
 
