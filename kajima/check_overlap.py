@@ -83,7 +83,7 @@ def has_text_overlap(pdf_path: str) -> bool:
     return False
 
 
-def main():
+def main() -> None:
     pdf_dir = Path(__file__).parent / "files" / "pdf"
     out_path = Path(__file__).parent / "files" / "test_filenames.txt"
     pdf_files = sorted(pdf_dir.glob("*.pdf"))

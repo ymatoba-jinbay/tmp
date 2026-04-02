@@ -6,6 +6,7 @@ import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
+from kajima.collect_labels import _strip_indices, collect_all_labels
 from kajima.extract_llm import FILES_DIR, PARSE_TYPES, XML_DIR
 from kajima.parse_xml import parse_xml
 
@@ -91,6 +92,7 @@ def _match_arrays(
     if not xml_items:
         return []
 
+    llm_flats = [_flatten(item) for item in llm_items]
     used_llm: set[int] = set()
     matches: list[tuple[int, int | None]] = []
 
@@ -99,10 +101,9 @@ def _match_arrays(
         best_j: int | None = None
         best_score = 0
 
-        for lj, l_item in enumerate(llm_items):
+        for lj, l_flat in enumerate(llm_flats):
             if lj in used_llm:
                 continue
-            l_flat = _flatten(l_item)
             score = sum(
                 1
                 for k, v in x_flat.items()
@@ -114,11 +115,114 @@ def _match_arrays(
                 best_score = score
                 best_j = lj
 
+        if best_score == 0:
+            best_j = None
+
         matches.append((xi, best_j))
         if best_j is not None:
             used_llm.add(best_j)
 
     return matches
+
+
+def _iter_unexpected_llm_values(
+    data: object,
+    prefix: str = "",
+) -> list[tuple[str, str]]:
+    """Collect non-empty leaf values that appear only in LLM output."""
+    values: list[tuple[str, str]] = []
+
+    if isinstance(data, dict):
+        for k, v in data.items():
+            key = f"{prefix}.{k}" if prefix else k
+            values.extend(_iter_unexpected_llm_values(v, key))
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            values.extend(_iter_unexpected_llm_values(item, f"{prefix}[{i}]"))
+    else:
+        value = "" if data is None else str(data)
+        if prefix and _normalize(value):
+            values.append((prefix, value))
+
+    return values
+
+
+def _mark_unexpected_llm_fields(
+    llm_data: object,
+    xml_data: object,
+    details: list[dict],
+    counters: dict,
+    expected_labels: set[str] | None = None,
+    prefix: str = "",
+) -> None:
+    """Count non-empty LLM-only fields as false positives."""
+    if isinstance(llm_data, dict):
+        xml_dict = xml_data if isinstance(xml_data, dict) else {}
+        for key, llm_value in llm_data.items():
+            child_prefix = f"{prefix}.{key}" if prefix else key
+            if key in xml_dict:
+                _mark_unexpected_llm_fields(
+                    llm_value,
+                    xml_dict[key],
+                    details,
+                    counters,
+                    expected_labels,
+                    child_prefix,
+                )
+                continue
+
+            for field, value in _iter_unexpected_llm_values(llm_value, child_prefix):
+                if (
+                    expected_labels is not None
+                    and _strip_indices(field) not in expected_labels
+                ):
+                    continue
+                counters["incorrect"] += 1
+                details.append(
+                    {
+                        "field": field,
+                        "top_section": _top_section_key(field),
+                        "section": _section_key(field),
+                        "status": "incorrect",
+                        "error_type": "false_positive",
+                        "xml": "",
+                        "llm": value,
+                    }
+                )
+
+    elif isinstance(llm_data, list):
+        xml_list = xml_data if isinstance(xml_data, list) else []
+        for index, llm_item in enumerate(llm_data):
+            xml_item = xml_list[index] if index < len(xml_list) else None
+            child_prefix = f"{prefix}[{index}]"
+            _mark_unexpected_llm_fields(
+                llm_item,
+                xml_item,
+                details,
+                counters,
+                expected_labels,
+                child_prefix,
+            )
+    elif prefix:
+        xml_value = "" if xml_data is None else str(xml_data)
+        llm_value = "" if llm_data is None else str(llm_data)
+        if (
+            xml_data is None
+            and _normalize(llm_value)
+            and (expected_labels is None or _strip_indices(prefix) in expected_labels)
+        ):
+            counters["incorrect"] += 1
+            details.append(
+                {
+                    "field": prefix,
+                    "top_section": _top_section_key(prefix),
+                    "section": _section_key(prefix),
+                    "status": "incorrect",
+                    "error_type": "false_positive",
+                    "xml": xml_value,
+                    "llm": llm_value,
+                }
+            )
 
 
 def _compare_values(
@@ -127,48 +231,74 @@ def _compare_values(
     llm_value: str,
     details: list[dict],
     counters: dict,
+    expected_labels: set[str] | None = None,
 ) -> None:
     """Compare a single xml vs llm value and update counters/details."""
     xml_norm = _normalize(xml_value)
-    if not xml_norm:
-        return
-
     llm_norm = _normalize(llm_value)
+
+    if not xml_norm:
+        # XMLが空でもLLMが値を出力しており、expected_labelsに含まれる場合は
+        # false positive（incorrect）としてカウント
+        if (
+            llm_norm
+            and expected_labels is not None
+            and _strip_indices(key) in expected_labels
+        ):
+            counters["incorrect"] += 1
+            details.append(
+                {
+                    "field": key,
+                    "top_section": _top_section_key(key),
+                    "section": _section_key(key),
+                    "status": "incorrect",
+                    "error_type": "false_positive",
+                    "xml": xml_value,
+                    "llm": llm_value,
+                }
+            )
+        return
 
     if not llm_norm:
         counters["not_extracted"] += 1
-        details.append({
-            "field": key,
-            "top_section": _top_section_key(key),
-            "section": _section_key(key),
-            "status": "not_extracted",
-            "xml": xml_value,
-            "llm": "",
-        })
+        details.append(
+            {
+                "field": key,
+                "top_section": _top_section_key(key),
+                "section": _section_key(key),
+                "status": "not_extracted",
+                "xml": xml_value,
+                "llm": "",
+            }
+        )
         return
 
     if xml_norm == llm_norm:
         counters["correct"] += 1
-        details.append({
-            "field": key,
-            "top_section": _top_section_key(key),
-            "section": _section_key(key),
-            "status": "correct",
-            "xml": xml_value,
-            "llm": llm_value,
-        })
+        details.append(
+            {
+                "field": key,
+                "top_section": _top_section_key(key),
+                "section": _section_key(key),
+                "status": "correct",
+                "xml": xml_value,
+                "llm": llm_value,
+            }
+        )
     else:
         counters["incorrect"] += 1
         error_type = _classify_error(xml_norm, llm_norm)
-        details.append({
-            "field": key,
-            "top_section": _top_section_key(key),
-            "section": _section_key(key),
-            "status": "incorrect",
-            "error_type": error_type,
-            "xml": xml_value,
-            "llm": llm_value,
-        })
+        details.append(
+            {
+                "field": key,
+                "top_section": _top_section_key(key),
+                "section": _section_key(key),
+                "status": "incorrect",
+                "error_type": error_type,
+                "xml": xml_value,
+                "llm": llm_value,
+            }
+        )
 
 
 def _evaluate_recursive(
@@ -177,104 +307,144 @@ def _evaluate_recursive(
     prefix: str,
     details: list[dict],
     counters: dict,
+    expected_labels: set[str] | None = None,
 ) -> None:
     """Recursively evaluate xml vs llm data with smart array matching."""
     if isinstance(xml_data, list):
         llm_list = llm_data if isinstance(llm_data, list) else []
         # XML/LLM両方がdictのリストならベストマッチ
-        xml_dicts = [
-            x for x in xml_data if isinstance(x, dict)
-        ]
-        llm_dicts = [
-            x for x in llm_list if isinstance(x, dict)
-        ]
+        xml_dicts = [x for x in xml_data if isinstance(x, dict)]
+        llm_dicts = [x for x in llm_list if isinstance(x, dict)]
         if xml_dicts and len(xml_dicts) == len(xml_data):
             matches = _match_arrays(xml_dicts, llm_dicts)
             for xi, lj in matches:
-                matched_llm = (
-                    llm_dicts[lj] if lj is not None else {}
-                )
+                matched_llm = llm_dicts[lj] if lj is not None else {}
                 _evaluate_recursive(
                     xml_dicts[xi],
                     matched_llm,
                     f"{prefix}[{xi}]",
                     details,
                     counters,
+                    expected_labels,
                 )
         else:
             # scalar list: compare by index
             for i, x_item in enumerate(xml_data):
-                l_item = (
-                    llm_list[i]
-                    if i < len(llm_list)
-                    else None
-                )
+                l_item = llm_list[i] if i < len(llm_list) else None
                 _evaluate_recursive(
                     x_item,
                     l_item,
                     f"{prefix}[{i}]",
                     details,
                     counters,
+                    expected_labels,
                 )
     elif isinstance(xml_data, dict):
         llm_dict = llm_data if isinstance(llm_data, dict) else {}
         for k, v in xml_data.items():
             key = f"{prefix}.{k}" if prefix else k
             _evaluate_recursive(
-                v, llm_dict.get(k), key, details, counters
+                v,
+                llm_dict.get(k),
+                key,
+                details,
+                counters,
+                expected_labels,
             )
     else:
         xml_str = str(xml_data) if xml_data is not None else ""
         llm_str = str(llm_data) if llm_data is not None else ""
-        _compare_values(prefix, xml_str, llm_str, details, counters)
+        _compare_values(
+            prefix,
+            xml_str,
+            llm_str,
+            details,
+            counters,
+            expected_labels,
+        )
 
 
 def evaluate_single(
     xml_data: dict,
     llm_data: dict,
+    expected_labels: set[str] | None = None,
 ) -> dict:
     """Evaluate a single file.
 
-    Evaluation focuses on precision: only fields where LLM returned
-    a non-empty value are scored as correct/incorrect.
-    Fields where LLM returned empty are tracked separately as
-    not_extracted (may or may not be present in the PDF).
+    Precision: correct / (correct + incorrect)
+    Recall: correct / (correct + incorrect + not_extracted)
+      - not_extracted is filtered to only labels in expected_labels
+      - labels not in XML are skipped
+    F1: harmonic mean of precision and recall
 
     Array elements are matched by best field overlap, not by index.
     """
     details: list[dict] = []
     counters = {"correct": 0, "incorrect": 0, "not_extracted": 0}
 
-    _evaluate_recursive(xml_data, llm_data, "", details, counters)
+    _evaluate_recursive(xml_data, llm_data, "", details, counters, expected_labels)
+    _mark_unexpected_llm_fields(llm_data, xml_data, details, counters, expected_labels)
 
-    evaluated = counters["correct"] + counters["incorrect"]
-    precision = (
-        counters["correct"] / evaluated if evaluated > 0 else 0.0
+    # Filter not_extracted to only expected labels
+    if expected_labels is not None:
+        filtered_details = []
+        not_extracted_count = 0
+        for d in details:
+            if d["status"] == "not_extracted":
+                label = _strip_indices(d["field"])
+                if label in expected_labels:
+                    filtered_details.append(d)
+                    not_extracted_count += 1
+                # else: skip (label not in prediction universe)
+            else:
+                filtered_details.append(d)
+        details = filtered_details
+        counters["not_extracted"] = not_extracted_count
+
+    metrics = _calc_metrics(
+        counters["correct"], counters["incorrect"], counters["not_extracted"]
     )
 
     return {
         "correct": counters["correct"],
         "incorrect": counters["incorrect"],
         "not_extracted": counters["not_extracted"],
+        **metrics,
+        "details": details,
+    }
+
+
+def _calc_metrics(
+    correct: int, incorrect: int, not_extracted: int
+) -> dict[str, float]:
+    """Calculate precision, recall, F1 from counts."""
+    evaluated = correct + incorrect
+    precision = correct / evaluated if evaluated > 0 else 0.0
+    recall_denom = correct + incorrect + not_extracted
+    recall = correct / recall_denom if recall_denom > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+    return {
         "evaluated": evaluated,
         "precision": precision,
-        "details": details,
+        "recall": recall,
+        "f1": f1,
     }
 
 
 def _build_stats(counts: dict) -> dict:
     """Build stats dict from raw counts."""
-    evaluated = counts["correct"] + counts["incorrect"]
+    metrics = _calc_metrics(
+        counts["correct"], counts["incorrect"], counts["not_extracted"]
+    )
     return {
         "correct": counts["correct"],
         "incorrect": counts["incorrect"],
         "not_extracted": counts["not_extracted"],
-        "evaluated": evaluated,
-        "precision": (
-            counts["correct"] / evaluated
-            if evaluated > 0
-            else 0.0
-        ),
+        **metrics,
         "error_types": dict(counts["error_types"]),
     }
 
@@ -308,19 +478,11 @@ def _aggregate_sections(
         ]:
             target[key][status] += 1
             if status == "incorrect":
-                target[key]["error_types"][
-                    d["error_type"]
-                ] += 1
+                target[key]["error_types"][d["error_type"]] += 1
 
     return {
-        "top": {
-            k: _build_stats(v)
-            for k, v in sorted(top_sections.items())
-        },
-        "sub": {
-            k: _build_stats(v)
-            for k, v in sorted(sub_sections.items())
-        },
+        "top": {k: _build_stats(v) for k, v in sorted(top_sections.items())},
+        "sub": {k: _build_stats(v) for k, v in sorted(sub_sections.items())},
     }
 
 
@@ -328,6 +490,7 @@ def evaluate_batch(
     result_dir: Path,
     xml_dir: Path,
     output_path: Path,
+    expected_labels: set[str] | None = None,
 ) -> dict:
     """Run batch evaluation."""
     all_file_results: list[dict] = []
@@ -340,25 +503,20 @@ def evaluate_batch(
         try:
             xml_data = parse_xml(xml_file)
         except FileNotFoundError:
-            print(
-                f"XML not found for {result_file.name}, skipping"
-            )
+            print(f"XML not found for {result_file.name}, skipping")
             continue
 
         with open(result_file, "r", encoding="utf-8") as f:
             llm_data = json.load(f)
 
-        result = evaluate_single(xml_data, llm_data)
+        result = evaluate_single(xml_data, llm_data, expected_labels)
         result["file"] = stem
         all_file_results.append(result)
         all_details.extend(result["details"])
 
     total_correct = sum(r["correct"] for r in all_file_results)
     total_incorrect = sum(r["incorrect"] for r in all_file_results)
-    total_evaluated = total_correct + total_incorrect
-    total_not_extracted = sum(
-        r["not_extracted"] for r in all_file_results
-    )
+    total_not_extracted = sum(r["not_extracted"] for r in all_file_results)
 
     section_analysis = _aggregate_sections(all_details)
 
@@ -380,23 +538,22 @@ def evaluate_batch(
         if d["status"] == "incorrect"
     ]
 
+    overall_metrics = _calc_metrics(total_correct, total_incorrect, total_not_extracted)
+
     summary = {
         "total_files": len(all_file_results),
         "total_correct": total_correct,
         "total_incorrect": total_incorrect,
-        "total_evaluated": total_evaluated,
+        "total_evaluated": overall_metrics["evaluated"],
         "total_not_extracted": total_not_extracted,
-        "overall_precision": (
-            total_correct / total_evaluated
-            if total_evaluated > 0
-            else 0.0
-        ),
+        "overall_precision": overall_metrics["precision"],
+        "overall_recall": overall_metrics["recall"],
+        "overall_f1": overall_metrics["f1"],
         "error_type_totals": dict(error_type_totals),
         "section_analysis": section_analysis,
         "incorrect_examples": incorrect_examples,
         "per_file": [
-            {k: v for k, v in r.items() if k != "details"}
-            for r in all_file_results
+            {k: v for k, v in r.items() if k != "details"} for r in all_file_results
         ],
     }
 
@@ -415,6 +572,7 @@ def evaluate_batch(
 
 def _print_summary(summary: dict, file=None) -> None:
     """Print evaluation summary to stdout and optionally to a file object."""
+
     def _p(msg: str = "") -> None:
         print(msg)
         if file is not None:
@@ -425,12 +583,11 @@ def _print_summary(summary: dict, file=None) -> None:
         f"Evaluated: {summary['total_evaluated']} "
         f"(not extracted: {summary['total_not_extracted']})"
     )
+    _p(f"Correct: {summary['total_correct']}  Incorrect: {summary['total_incorrect']}")
     _p(
-        f"Correct: {summary['total_correct']}  "
-        f"Incorrect: {summary['total_incorrect']}"
-    )
-    _p(
-        f"Precision: {summary['overall_precision']:.2%}"
+        f"Precision: {summary['overall_precision']:.2%}  "
+        f"Recall: {summary['overall_recall']:.2%}  "
+        f"F1: {summary['overall_f1']:.2%}"
     )
 
     if summary["error_type_totals"]:
@@ -453,7 +610,9 @@ def _print_summary(summary: dict, file=None) -> None:
                 continue
             _p(
                 f"  {section}: "
-                f"{stats['precision']:.0%} "
+                f"P={stats['precision']:.0%} "
+                f"R={stats['recall']:.0%} "
+                f"F1={stats['f1']:.0%} "
                 f"({stats['correct']}/{stats['evaluated']})"
                 + (
                     f"  errors: {dict(stats['error_types'])}"
@@ -464,24 +623,26 @@ def _print_summary(summary: dict, file=None) -> None:
 
     worst = sorted(
         summary["per_file"],
-        key=lambda r: r["precision"],
+        key=lambda r: r["f1"],
     )[:5]
-    if worst and worst[0]["precision"] < 1.0:
-        _p("\nWorst 5 files:")
+    if worst and worst[0]["f1"] < 1.0:
+        _p("\nWorst 5 files (by F1):")
         for r in worst:
             _p(
-                f"  {r['file']}: {r['precision']:.0%} "
+                f"  {r['file']}: "
+                f"P={r['precision']:.0%} "
+                f"R={r['recall']:.0%} "
+                f"F1={r['f1']:.0%} "
                 f"({r['correct']}/{r['evaluated']}, "
-                f"{r['incorrect']} incorrect)"
+                f"{r['incorrect']} incorrect, "
+                f"{r['not_extracted']} not extracted)"
             )
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Evaluate LLM extraction accuracy"
-    )
+    parser = argparse.ArgumentParser(description="Evaluate LLM extraction accuracy")
     parser.add_argument(
         "--parse-type",
         choices=PARSE_TYPES + ["all"],
@@ -503,16 +664,16 @@ if __name__ == "__main__":
 
     xml_dir = Path(args.xml_dir) if args.xml_dir else XML_DIR
 
+    print("Collecting expected labels from all predictions...")
+    expected_labels = collect_all_labels()
+    print(f"Collected {len(expected_labels)} expected labels")
+
     if args.parse_type == "all":
         results_base = FILES_DIR / f"results_{args.llm}"
         if not results_base.exists():
             print(f"Results base directory not found: {results_base}")
             raise SystemExit(1)
-        parse_types = sorted(
-            d.name
-            for d in results_base.iterdir()
-            if d.is_dir()
-        )
+        parse_types = sorted(d.name for d in results_base.iterdir() if d.is_dir())
         if not parse_types:
             print(f"No parse type directories found in: {results_base}")
             raise SystemExit(1)
@@ -520,23 +681,17 @@ if __name__ == "__main__":
         parse_types = [args.parse_type]
 
     for parse_type in parse_types:
-        result_dir = (
-            FILES_DIR / f"results_{args.llm}" / parse_type
-        )
-        output_path = (
-            FILES_DIR
-            / f"evaluations_{args.llm}"
-            / f"{parse_type}.json"
-        )
+        result_dir = FILES_DIR / f"results_{args.llm}" / parse_type
+        output_path = FILES_DIR / f"evaluations_{args.llm}" / f"{parse_type}.json"
 
         if not result_dir.exists():
             print(f"Result directory not found: {result_dir}, skipping")
             continue
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"LLM: {args.llm}")
         print(f"Parse type: {parse_type}")
         print(f"Results: {result_dir}")
         print(f"Output: {output_path}")
 
-        evaluate_batch(result_dir, xml_dir, output_path)
+        evaluate_batch(result_dir, xml_dir, output_path, expected_labels)

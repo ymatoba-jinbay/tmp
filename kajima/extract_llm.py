@@ -66,8 +66,12 @@ def _get_prompts() -> tuple[str, str, str]:
 _FIXED_SCHEMA = _load_prompt("fixed_schema.txt")
 
 PARSE_TYPES = [
-    "pdf", "jpg", "position", "position_spatial",
-    "pymupdf4llm", "pymupdf",
+    "pdf",
+    "jpg",
+    "position",
+    "position_spatial",
+    "pymupdf4llm",
+    "pymupdf",
 ]
 MAX_RETRIES = 2
 
@@ -97,9 +101,7 @@ def get_claude_client(
     if _claude_client is None:
         import anthropic
 
-        _claude_client = anthropic.AnthropicBedrock(
-            aws_region=region
-        )
+        _claude_client = anthropic.AnthropicBedrock(aws_region=region)
     return _claude_client
 
 
@@ -179,9 +181,7 @@ def _strip_markdown_fences(text: str) -> str:
     return "\n".join(json_lines)
 
 
-def _parse_and_validate(
-    result_text: str, schema: dict | None
-) -> dict:
+def _parse_and_validate(result_text: str, schema: dict | None) -> dict:
     """Parse JSON text and validate against schema.
 
     Raises json.JSONDecodeError or ValueError on failure.
@@ -206,9 +206,7 @@ def _pdf_to_images(pdf_path: Path, dpi: int = 200) -> list[bytes]:
     matrix = fitz.Matrix(zoom, zoom)
     for page in doc:
         pix = page.get_pixmap(matrix=matrix)
-        img = Image.frombytes(
-            "RGB", (pix.width, pix.height), pix.samples
-        )
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)
         images.append(buf.getvalue())
@@ -233,16 +231,10 @@ def _load_test_filenames() -> list[str]:
     txt_path = FILES_DIR / "test_filenames.txt"
     if not txt_path.exists():
         return []
-    return [
-        line.strip()
-        for line in txt_path.read_text().splitlines()
-        if line.strip()
-    ]
+    return [line.strip() for line in txt_path.read_text().splitlines() if line.strip()]
 
 
-def _list_input_files(
-    input_dir: Path, parse_type: str
-) -> list[Path]:
+def _list_input_files(input_dir: Path, parse_type: str) -> list[Path]:
     """List input files for the given parse_type.
 
     Files are filtered and ordered by test_filenames.txt.
@@ -262,11 +254,7 @@ def _list_input_files(
         }
 
     if test_names:
-        return [
-            all_files[name]
-            for name in test_names
-            if name in all_files
-        ]
+        return [all_files[name] for name in test_names if name in all_files]
     return sorted(all_files.values(), key=lambda f: f.name)
 
 
@@ -288,15 +276,12 @@ def extract_with_gemini(
 
     if images is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        parts = [
-            types.Part.from_bytes(
-                data=img, mime_type="image/jpeg"
-            )
-            for img in images
+        base_parts = [
+            types.Part.from_bytes(data=img, mime_type="image/jpeg") for img in images
         ] + [types.Part(text=prompt)]
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        parts = [
+        base_parts = [
             types.Part.from_bytes(
                 data=pdf_path.read_bytes(),
                 mime_type="application/pdf",
@@ -304,27 +289,30 @@ def extract_with_gemini(
             types.Part(text=prompt),
         ]
     else:
-        prompt = extraction_prompt.format(
-            schema=schema_text, text=text
-        )
-        parts = [types.Part(text=prompt)]
+        base_parts = [
+            types.Part(text=extraction_prompt.format(schema=schema_text, text=text))
+        ]
 
     total_usage = TokenUsage()
     last_error = ""
+    result_text = ""
 
     for attempt in range(1 + MAX_RETRIES):
+        parts = list(base_parts)
         if attempt > 0:
-            retry_prompt = retry_tmpl.format(
-                errors=last_error, schema=schema_text
+            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
+            parts.extend(
+                [
+                    types.Part(text="Previous invalid JSON response:"),
+                    types.Part(text=result_text),
+                    types.Part(text=retry_prompt),
+                ]
             )
-            parts = [types.Part(text=retry_prompt)]
             print(f"    Retry {attempt}/{MAX_RETRIES}")
 
         response = client.models.generate_content(
             model=model_name,
-            contents=[
-                types.Content(role="user", parts=parts)
-            ],
+            contents=[types.Content(role="user", parts=parts)],
             config=types.GenerateContentConfig(
                 temperature=0,
                 response_mime_type="application/json",
@@ -332,9 +320,7 @@ def extract_with_gemini(
         )
 
         if response.usage_metadata:
-            total_usage.input_tokens += (
-                response.usage_metadata.prompt_token_count or 0
-            )
+            total_usage.input_tokens += response.usage_metadata.prompt_token_count or 0
             total_usage.output_tokens += (
                 response.usage_metadata.candidates_token_count or 0
             )
@@ -342,9 +328,7 @@ def extract_with_gemini(
         result_text = (response.text or "").strip()
         try:
             data = _parse_and_validate(result_text, schema)
-            return ExtractionResult(
-                data=data, usage=total_usage
-            )
+            return ExtractionResult(data=data, usage=total_usage)
         except (json.JSONDecodeError, ValueError) as e:
             last_error = str(e)
             if attempt == MAX_RETRIES:
@@ -380,18 +364,14 @@ def extract_with_claude(
                 "source": {
                     "type": "base64",
                     "media_type": "image/jpeg",
-                    "data": base64.standard_b64encode(
-                        img
-                    ).decode("ascii"),
+                    "data": base64.standard_b64encode(img).decode("ascii"),
                 },
             }
             for img in images
         ] + [{"type": "text", "text": prompt}]
     elif pdf_path is not None:
         prompt = pdf_prompt.format(schema=schema_text)
-        pdf_b64 = base64.standard_b64encode(
-            pdf_path.read_bytes()
-        ).decode("ascii")
+        pdf_b64 = base64.standard_b64encode(pdf_path.read_bytes()).decode("ascii")
         initial_content = [
             {
                 "type": "document",
@@ -407,24 +387,18 @@ def extract_with_claude(
         initial_content = [
             {
                 "type": "text",
-                "text": extraction_prompt.format(
-                    schema=schema_text, text=text
-                ),
+                "text": extraction_prompt.format(schema=schema_text, text=text),
             }
         ]
 
     total_usage = TokenUsage()
     last_error = ""
     result_text = ""
-    messages: list = [
-        {"role": "user", "content": initial_content}
-    ]
+    messages: list = [{"role": "user", "content": initial_content}]
 
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
-            retry_prompt = retry_tmpl.format(
-                errors=last_error, schema=schema_text
-            )
+            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
             messages = [
                 *messages,
                 {"role": "assistant", "content": result_text},
@@ -443,20 +417,13 @@ def extract_with_claude(
 
         first_block = response.content[0]
         if not isinstance(first_block, anthropic.types.TextBlock):
-            msg = (
-                f"Expected TextBlock, "
-                f"got {type(first_block).__name__}"
-            )
+            msg = f"Expected TextBlock, got {type(first_block).__name__}"
             raise TypeError(msg)
-        result_text = _strip_markdown_fences(
-            first_block.text.strip()
-        )
+        result_text = _strip_markdown_fences(first_block.text.strip())
 
         try:
             data = _parse_and_validate(result_text, schema)
-            return ExtractionResult(
-                data=data, usage=total_usage
-            )
+            return ExtractionResult(data=data, usage=total_usage)
         except (json.JSONDecodeError, ValueError) as e:
             last_error = str(e)
             if attempt == MAX_RETRIES:
@@ -487,25 +454,16 @@ def process_file(
     stem = file_path.stem
     is_pdf = file_path.suffix.lower() == ".pdf"
 
-    extract_fn = (
-        extract_with_gemini if llm == "gemini"
-        else extract_with_claude
-    )
-    kwargs: dict = {"xml_dir": xml_dir}
-
+    extract_fn = extract_with_gemini if llm == "gemini" else extract_with_claude
     start_time = time.monotonic()
 
     if is_pdf and parse_type == "jpg":
-        result = extract_fn(
-            stem, images=_pdf_to_images(file_path), **kwargs
-        )
+        result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir)
     elif is_pdf:
-        result = extract_fn(
-            stem, pdf_path=file_path, **kwargs
-        )
+        result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir)
     else:
         text = file_path.read_text(encoding="utf-8")
-        result = extract_fn(stem, text=text, **kwargs)
+        result = extract_fn(stem, text=text, xml_dir=xml_dir)
 
     result.elapsed_seconds = time.monotonic() - start_time
 
@@ -521,9 +479,7 @@ def process_file(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Extract boring info using LLM"
-    )
+    parser = argparse.ArgumentParser(description="Extract boring info using LLM")
     parser.add_argument(
         "--parse-type",
         choices=PARSE_TYPES,
@@ -573,7 +529,7 @@ if __name__ == "__main__":
 
     input_files = _list_input_files(input_dir, args.parse_type)
     if args.offset > 0:
-        input_files = input_files[args.offset:]
+        input_files = input_files[args.offset :]
     if args.limit > 0:
         input_files = input_files[: args.limit]
 

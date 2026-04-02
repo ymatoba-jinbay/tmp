@@ -26,6 +26,7 @@ def _elem_to_dict(elem: ET.Element) -> dict | str:
     - Leaf element (no children): returns its text (str).
     - Parent element: returns a dict of tag -> value.
     - When multiple children share the same tag, they become a list.
+    - XML attributes and mixed content are ignored.
     """
     children = list(elem)
     if not children:
@@ -52,9 +53,7 @@ def build_json_schema(data: dict) -> dict:
     """Build a JSON Schema (Draft-07) from a parsed XML dict."""
     from genson import SchemaBuilder
 
-    builder = SchemaBuilder(
-        schema_uri="http://json-schema.org/draft-07/schema#"
-    )
+    builder = SchemaBuilder(schema_uri="http://json-schema.org/draft-07/schema#")
     builder.add_object(data)
     return builder.to_schema()
 

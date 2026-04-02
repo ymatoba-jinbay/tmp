@@ -4,8 +4,11 @@ import re
 import unicodedata
 from enum import Enum
 from pathlib import Path
+from typing import Any, cast
 
 import pdfplumber
+
+FILES_DIR = Path(__file__).resolve().parent / "files"
 
 
 class ExtractionType(str, Enum):
@@ -24,14 +27,16 @@ def _flush_vertical_group(
 ) -> None:
     """Flush a group of single-char words into vertical or remaining."""
     if len(current) > 1:
-        vertical_words.append({
-            "text": "".join(c["text"] for c in current),
-            "x0": min(c["x0"] for c in current),
-            "top": current[0]["top"],
-            "x1": max(c["x1"] for c in current),
-            "bottom": current[-1]["bottom"],
-            "direction": "vertical",
-        })
+        vertical_words.append(
+            {
+                "text": "".join(c["text"] for c in current),
+                "x0": min(c["x0"] for c in current),
+                "top": current[0]["top"],
+                "x1": max(c["x1"] for c in current),
+                "bottom": current[-1]["bottom"],
+                "direction": "vertical",
+            }
+        )
     else:
         remaining_singles.append(current[0])
 
@@ -68,13 +73,9 @@ def _group_vertical_words(
             if w["top"] - prev["bottom"] < y_gap_max:
                 current.append(w)
             else:
-                _flush_vertical_group(
-                    current, vertical_words, remaining_singles
-                )
+                _flush_vertical_group(current, vertical_words, remaining_singles)
                 current = [w]
-        _flush_vertical_group(
-            current, vertical_words, remaining_singles
-        )
+        _flush_vertical_group(current, vertical_words, remaining_singles)
 
     return multi_chars + remaining_singles + vertical_words
 
@@ -96,11 +97,7 @@ def _extract_with_position(pdf_path: Path) -> str:
             grouped = _group_vertical_words(words)
             grouped.sort(key=lambda w: (w["top"], w["x0"]))
             for w in grouped:
-                lines.append(
-                    f"[x={w['x0']:.0f},"
-                    f"y={w['top']:.0f}] "
-                    f"{w['text']}"
-                )
+                lines.append(f"[x={w['x0']:.0f},y={w['top']:.0f}] {w['text']}")
         return "\n".join(lines)
 
 
@@ -123,8 +120,10 @@ def _build_spatial_text(position_text: str, page_width: float = 595.0) -> str:
             if current_entries:
                 pages_output.append(
                     _render_spatial_page(
-                        current_page_header, current_entries,
-                        col_scale, y_line_height,
+                        current_page_header,
+                        current_entries,
+                        col_scale,
+                        y_line_height,
                     )
                 )
                 current_entries = []
@@ -141,8 +140,10 @@ def _build_spatial_text(position_text: str, page_width: float = 595.0) -> str:
     if current_entries:
         pages_output.append(
             _render_spatial_page(
-                current_page_header, current_entries,
-                col_scale, y_line_height,
+                current_page_header,
+                current_entries,
+                col_scale,
+                y_line_height,
             )
         )
 
@@ -176,7 +177,8 @@ def _render_spatial_page(
 
 
 def _render_row(
-    entries: list[tuple[float, str]], col_scale: float,
+    entries: list[tuple[float, str]],
+    col_scale: float,
 ) -> str:
     """同じ行のエントリをx座標に基づいてスペースで配置する。"""
     entries.sort(key=lambda e: e[0])
@@ -188,8 +190,7 @@ def _render_row(
             buf.append(" " * (target_col - current_col))
         buf.append(text)
         text_width = sum(
-            2 if unicodedata.east_asian_width(c) in ("F", "W") else 1
-            for c in text
+            2 if unicodedata.east_asian_width(c) in ("F", "W") else 1 for c in text
         )
         current_col = max(target_col + text_width, current_col + text_width)
     return "".join(buf)
@@ -226,11 +227,13 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
     pages = []
     for page in doc:
         tabs = page.find_tables()
-        table_rects = [t.bbox for t in tabs.tables]
+        tables = [] if tabs is None else list(tabs.tables)
+        table_rects = [t.bbox for t in tables]
 
         # テーブル領域外のテキストを抽出
         non_table_blocks = []
-        blocks = page.get_text("dict")["blocks"]
+        text_dict = cast(dict[str, Any], page.get_text("dict"))
+        blocks = cast(list[dict[str, Any]], text_dict.get("blocks", []))
         for block in blocks:
             if block["type"] != 0:
                 continue
@@ -241,27 +244,35 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
             )
             if not in_table:
                 lines_text = []
-                for line in block["lines"]:
+                for line in cast(list[dict[str, Any]], block.get("lines", [])):
                     spans_text = "".join(
-                        span["text"] for span in line["spans"]
+                        span["text"]
+                        for span in cast(
+                            list[dict[str, Any]],
+                            line.get("spans", []),
+                        )
                     )
                     if spans_text.strip():
                         lines_text.append(spans_text)
                 if lines_text:
-                    non_table_blocks.append({
-                        "y": by0,
-                        "content": "\n".join(lines_text),
-                    })
+                    non_table_blocks.append(
+                        {
+                            "y": by0,
+                            "content": "\n".join(lines_text),
+                        }
+                    )
 
         # テーブルをmarkdown化
         table_blocks = []
-        for t, rect in zip(tabs.tables, table_rects):
+        for t, rect in zip(tables, table_rects):
             md = _table_to_markdown(t.extract())
             if md.strip():
-                table_blocks.append({
-                    "y": rect[1],
-                    "content": "\n" + md + "\n",
-                })
+                table_blocks.append(
+                    {
+                        "y": rect[1],
+                        "content": "\n" + md + "\n",
+                    }
+                )
 
         # y座標順にソートして結合
         all_blocks = non_table_blocks + table_blocks
@@ -304,8 +315,7 @@ def extract_text_from_pdf(
             return _extract_with_markdown(pdf_path)
         case ExtractionType.HTML:
             raise ValueError(
-                "HTML type converts from parsed markdown. "
-                "Use parse_and_save() instead."
+                "HTML type converts from parsed markdown. Use parse_and_save() instead."
             )
         case ExtractionType.PYMUPDF:
             return _extract_with_pymupdf(pdf_path)
@@ -337,14 +347,12 @@ def parse_and_save(
     """
     pdf_path = Path(pdf_path)
     if output_dir is None:
-        output_dir = (
-            Path("kajima/files/parsed") / extraction_type.value
-        )
+        output_dir = FILES_DIR / "parsed" / extraction_type.value
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if extraction_type == ExtractionType.HTML:
-        base_parsed = Path("kajima/files/parsed")
+        base_parsed = FILES_DIR / "parsed"
         md_sources = {
             "pymupdf": base_parsed / "pymupdf",
             "pymupdf4llm": base_parsed / "pymupdf4llm",
@@ -389,12 +397,8 @@ def parse_and_save(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Extract text from boring PDF"
-    )
-    parser.add_argument(
-        "pdf_path", help="Path to PDF file or directory"
-    )
+    parser = argparse.ArgumentParser(description="Extract text from boring PDF")
+    parser.add_argument("pdf_path", help="Path to PDF file or directory")
     parser.add_argument(
         "--extraction-type",
         choices=[e.value for e in ExtractionType],
@@ -420,11 +424,9 @@ if __name__ == "__main__":
     if pdf_path.is_dir():
         pdf_files = sorted(pdf_path.glob("*.pdf"))
         if args.limit > 0:
-            pdf_files = pdf_files[:args.limit]
+            pdf_files = pdf_files[: args.limit]
         for i, pf in enumerate(pdf_files):
-            print(
-                f"[{i + 1}/{len(pdf_files)}] Processing: {pf.name}"
-            )
+            print(f"[{i + 1}/{len(pdf_files)}] Processing: {pf.name}")
             try:
                 parse_and_save(
                     pf,
