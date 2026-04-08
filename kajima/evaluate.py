@@ -202,8 +202,9 @@ def _mark_unexpected_llm_fields(
     elif prefix:
         xml_value = "" if xml_data is None else str(xml_data)
         llm_value = "" if llm_data is None else str(llm_data)
+        xml_str = "" if xml_data is None else str(xml_data)
         if (
-            xml_data is None
+            not _normalize(xml_str)
             and _normalize(llm_value)
             and (expected_labels is None or _strip_indices(prefix) in expected_labels)
         ):
@@ -227,32 +228,14 @@ def _compare_values(
     llm_value: str,
     details: list[dict],
     counters: dict,
-    expected_labels: set[str] | None = None,
 ) -> None:
     """Compare a single xml vs llm value and update counters/details."""
     xml_norm = _normalize(xml_value)
     llm_norm = _normalize(llm_value)
 
     if not xml_norm:
-        # XMLが空でもLLMが値を出力しており、expected_labelsに含まれる場合は
-        # false positive（incorrect）としてカウント
-        if (
-            llm_norm
-            and expected_labels is not None
-            and _strip_indices(key) in expected_labels
-        ):
-            counters["incorrect"] += 1
-            details.append(
-                {
-                    "field": key,
-                    "top_section": _top_section_key(key),
-                    "section": _section_key(key),
-                    "status": "incorrect",
-                    "error_type": "false_positive",
-                    "xml": xml_value,
-                    "llm": llm_value,
-                }
-            )
+        # XMLが空の場合はスキップ（LLMが値を出力していた場合の
+        # false positive判定は _mark_unexpected_llm_fields で一括処理）
         return
 
     if not llm_norm:
@@ -364,7 +347,6 @@ def _evaluate_recursive(
             llm_str,
             details,
             counters,
-            expected_labels,
         )
 
 
@@ -495,7 +477,7 @@ def evaluate_batch(
     xml_dir: Path,
     output_path: Path,
     expected_labels: set[str] | None = None,
-) -> dict:
+) -> None:
     """Run batch evaluation."""
     all_file_results: list[dict] = []
     all_details: list[dict] = []
@@ -578,87 +560,6 @@ def evaluate_batch(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"Evaluation saved: {output_path}")
-
-    txt_path = output_path.with_suffix(".txt")
-    with open(txt_path, "w", encoding="utf-8") as txt_f:
-        _print_summary(summary, file=txt_f)
-    print(f"Summary saved: {txt_path}")
-
-    return summary
-
-
-def _print_summary(summary: dict, file=None) -> None:
-    """Print evaluation summary to stdout and optionally to a file object."""
-
-    def _p(msg: str = "") -> None:
-        print(msg)
-        if file is not None:
-            print(msg, file=file)
-
-    _p(f"\nFiles: {summary['total_files']}")
-    _p(
-        f"Evaluated: {summary['total_evaluated']} "
-        f"(not extracted: {summary['total_not_extracted']})"
-    )
-    _p(f"Correct: {summary['total_correct']}  Incorrect: {summary['total_incorrect']}")
-    if summary.get("total_retries", 0) > 0:
-        _p(
-            f"Retries: {summary['total_retries']} total "
-            f"({summary['retried_files']} files)"
-        )
-    _p(
-        f"Precision: {summary['overall_precision']:.2%}  "
-        f"Recall: {summary['overall_recall']:.2%}  "
-        f"F1: {summary['overall_f1']:.2%}"
-    )
-
-    if summary["error_type_totals"]:
-        _p("\nError types:")
-        for etype, count in sorted(
-            summary["error_type_totals"].items(),
-            key=lambda x: -x[1],
-        ):
-            _p(f"  {etype}: {count}")
-
-    section_analysis = summary["section_analysis"]
-
-    for label, key in [
-        ("top-level", "top"),
-        ("sub-section", "sub"),
-    ]:
-        _p(f"\nSection analysis ({label}):")
-        for section, stats in section_analysis[key].items():
-            if stats["evaluated"] == 0:
-                continue
-            _p(
-                f"  {section}: "
-                f"P={stats['precision']:.0%} "
-                f"R={stats['recall']:.0%} "
-                f"F1={stats['f1']:.0%} "
-                f"({stats['correct']}/{stats['evaluated']})"
-                + (
-                    f"  errors: {dict(stats['error_types'])}"
-                    if stats["error_types"]
-                    else ""
-                )
-            )
-
-    worst = sorted(
-        summary["per_file"],
-        key=lambda r: r["f1"],
-    )[:5]
-    if worst and worst[0]["f1"] < 1.0:
-        _p("\nWorst 5 files (by F1):")
-        for r in worst:
-            _p(
-                f"  {r['file']}: "
-                f"P={r['precision']:.0%} "
-                f"R={r['recall']:.0%} "
-                f"F1={r['f1']:.0%} "
-                f"({r['correct']}/{r['evaluated']}, "
-                f"{r['incorrect']} incorrect, "
-                f"{r['not_extracted']} not extracted)"
-            )
 
 
 if __name__ == "__main__":
