@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from kajima.collect_labels import _strip_indices, collect_all_labels
-from kajima.extract_llm import FILES_DIR, XML_DIR
+from kajima.extract_llm import FILES_DIR, LLM_CHOICES, XML_DIR
 from kajima.parse_xml import parse_xml
 
 
@@ -16,6 +16,10 @@ def _normalize(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).strip()
     # 各種ハイフン・ダッシュ・マイナス記号を統一
     value = re.sub(r"[\u2010-\u2015\u2212\uFF0D\uFF70\u30FC]", "-", value)
+    # 度分秒記号を除去（座標値の比較用）
+    value = re.sub(r"[°′″'\"｡]", "", value)
+    # コロンとハイフンを統一（JIS規格番号 等）
+    value = value.replace(":", "-")
     # 空白・括弧類（半角/全角）を除去して比較精度を上げる
     value = re.sub(r"[\s()\[\]{}（）［］｛｝【】「」『』〈〉《》〔〕]", "", value)
     # 区切り文字（読点、カンマ、改行）をソートして比較できるよう統一
@@ -66,14 +70,6 @@ def _top_section_key(field: str) -> str:
 
 def _classify_error(xml_norm: str, llm_norm: str) -> str:
     """Classify the type of mismatch between xml and llm values."""
-    try:
-        xml_f = float(xml_norm)
-        llm_f = float(llm_norm)
-        if xml_f != 0 and abs(xml_f - llm_f) / abs(xml_f) < 0.01:
-            return "numeric_close"
-    except ValueError:
-        pass
-
     if xml_norm in llm_norm or llm_norm in xml_norm:
         return "partial_match"
 
@@ -273,7 +269,15 @@ def _compare_values(
         )
         return
 
-    if xml_norm == llm_norm:
+    # 文字列一致 or 数値として等価なら correct
+    numerically_equal = False
+    if xml_norm != llm_norm:
+        try:
+            numerically_equal = float(xml_norm) == float(llm_norm)
+        except ValueError:
+            pass
+
+    if xml_norm == llm_norm or numerically_equal:
         counters["correct"] += 1
         details.append(
             {
@@ -669,7 +673,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--llm",
-        choices=["gemini", "claude"],
+        choices=LLM_CHOICES,
         default="gemini",
     )
     parser.add_argument(

@@ -55,6 +55,21 @@ PARSE_TYPES = [
     "pymupdf",
 ]
 
+LLM_CHOICES = [
+    "gemini",
+    "gemini-3-flash",
+    "gemini-3.1-pro",
+    "claude",
+]
+
+# LLM name -> (extract function name, model name override or None for default)
+LLM_CONFIG: dict[str, tuple[str, str | None]] = {
+    "gemini": ("gemini", None),  # default: gemini-2.5-pro
+    "gemini-3-flash": ("gemini", "gemini-3-flash-preview"),
+    "gemini-3.1-pro": ("gemini", "gemini-3.1-pro-preview"),
+    "claude": ("claude", None),  # default: jp.anthropic.claude-sonnet-4-6
+}
+
 _gemini_client = None
 _claude_client = None
 
@@ -416,7 +431,7 @@ def extract_with_claude(
 
 def process_file(
     file_path: Path,
-    llm: Literal["gemini", "claude"],
+    llm: str,
     output_dir: Path,
     xml_dir: Path = XML_DIR,
     parse_type: str = "pdf",
@@ -425,7 +440,7 @@ def process_file(
 
     Args:
         file_path: Path to the input file (PDF or parsed text).
-        llm: LLM to use.
+        llm: LLM to use (key in LLM_CONFIG).
         output_dir: Directory to save results.
         xml_dir: Directory containing XML files for schema generation.
         parse_type: Input parse type.
@@ -436,17 +451,21 @@ def process_file(
     stem = file_path.stem
     is_pdf = file_path.suffix.lower() == ".pdf"
 
-    extract_fn = extract_with_gemini if llm == "gemini" else extract_with_claude
+    backend, model_override = LLM_CONFIG[llm]
+    extract_fn = extract_with_gemini if backend == "gemini" else extract_with_claude
+    extra_kwargs: dict = {}
+    if model_override:
+        extra_kwargs["model_name"] = model_override
     start_time = time.monotonic()
 
     try:
         if is_pdf and parse_type == "jpg":
-            result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir)
+            result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir, **extra_kwargs)
         elif is_pdf:
-            result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir)
+            result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir, **extra_kwargs)
         else:
             text = file_path.read_text(encoding="utf-8")
-            result = extract_fn(stem, text=text, xml_dir=xml_dir)
+            result = extract_fn(stem, text=text, xml_dir=xml_dir, **extra_kwargs)
     except Exception as e:
         elapsed = time.monotonic() - start_time
         print(f"  Failed ({elapsed:.1f}s): {e}")
@@ -490,7 +509,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--llm",
-        choices=["gemini", "claude"],
+        choices=LLM_CHOICES,
         default="gemini",
     )
     parser.add_argument(

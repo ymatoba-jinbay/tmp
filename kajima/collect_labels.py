@@ -42,10 +42,10 @@ def collect_all_labels(files_dir: Path = FILES_DIR) -> set[str]:
     """Collect all unique labels from all prediction results."""
     all_labels: set[str] = set()
 
-    for llm in ["claude", "gemini"]:
-        results_base = files_dir / f"results_{llm}"
-        if not results_base.exists():
+    for d in sorted(files_dir.iterdir()):
+        if not d.is_dir() or not d.name.startswith("results_"):
             continue
+        results_base = d
 
         for parse_dir in sorted(results_base.iterdir()):
             if not parse_dir.is_dir():
