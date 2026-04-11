@@ -60,6 +60,7 @@ LLM_CHOICES = [
     "gemini-3-flash",
     "gemini-3.1-pro",
     "claude",
+    "gpt5.4",
 ]
 
 # LLM name -> (extract function name, model name override or None for default)
@@ -68,10 +69,12 @@ LLM_CONFIG: dict[str, tuple[str, str | None]] = {
     "gemini-3-flash": ("gemini", "gemini-3-flash-preview"),
     "gemini-3.1-pro": ("gemini", "gemini-3.1-pro-preview"),
     "claude": ("claude", None),  # default: jp.anthropic.claude-sonnet-4-6
+    "gpt5.4": ("openai", "gpt-5.4"),
 }
 
 _gemini_client = None
 _claude_client = None
+_openai_client = None
 
 
 def get_gemini_client():  # type: ignore[no-untyped-def]
@@ -98,6 +101,16 @@ def get_claude_client(
 
         _claude_client = anthropic.AnthropicBedrock(aws_region=region)
     return _claude_client
+
+
+def get_openai_client():  # type: ignore[no-untyped-def]
+    """Get or create a cached OpenAI client."""
+    global _openai_client  # noqa: PLW0603
+    if _openai_client is None:
+        from openai import OpenAI
+
+        _openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
 
 
 @dataclass
@@ -429,6 +442,92 @@ def extract_with_claude(
     raise RuntimeError("Unreachable")
 
 
+def extract_with_openai(
+    stem: str,
+    text: str | None = None,
+    pdf_path: Path | None = None,
+    images: list[bytes] | None = None,
+    model_name: str = "gpt-5.4",
+    xml_dir: Path = XML_DIR,
+) -> ExtractionResult:
+    """Extract information using OpenAI GPT."""
+    import base64
+
+    client = get_openai_client()
+    extraction_prompt, pdf_prompt, retry_tmpl = _get_prompts()
+
+    schema_text, schema = _resolve_schema(stem, xml_dir)
+
+    if images is not None:
+        prompt = pdf_prompt.format(schema=schema_text)
+        initial_content: list = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64.standard_b64encode(img).decode('ascii')}"
+                },
+            }
+            for img in images
+        ] + [{"type": "text", "text": prompt}]
+    elif pdf_path is not None:
+        # Convert PDF to images since not all OpenAI models accept PDFs directly.
+        prompt = pdf_prompt.format(schema=schema_text)
+        initial_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64.standard_b64encode(img).decode('ascii')}"
+                },
+            }
+            for img in _pdf_to_images(pdf_path)
+        ] + [{"type": "text", "text": prompt}]
+    else:
+        initial_content = [
+            {
+                "type": "text",
+                "text": extraction_prompt.format(schema=schema_text, text=text),
+            }
+        ]
+
+    total_usage = TokenUsage()
+    last_error = ""
+    result_text = ""
+    messages: list = [{"role": "user", "content": initial_content}]
+
+    for attempt in range(1 + MAX_RETRIES):
+        if attempt > 0:
+            retry_prompt = retry_tmpl.format(errors=last_error, schema=schema_text)
+            messages = [
+                *messages,
+                {"role": "assistant", "content": result_text},
+                {"role": "user", "content": retry_prompt},
+            ]
+            print(f"    Retry {attempt}/{MAX_RETRIES}")
+
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,  # type: ignore[arg-type]
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+
+        if response.usage:
+            total_usage.input_tokens += response.usage.prompt_tokens
+            total_usage.output_tokens += response.usage.completion_tokens
+
+        result_text = _strip_markdown_fences((response.choices[0].message.content or "").strip())
+
+        try:
+            data = _parse_and_validate(result_text, schema)
+            return ExtractionResult(data=data, usage=total_usage, retry_count=attempt)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt == MAX_RETRIES:
+                raise
+
+    raise RuntimeError("Unreachable")
+
+
 def process_file(
     file_path: Path,
     llm: str,
@@ -452,7 +551,12 @@ def process_file(
     is_pdf = file_path.suffix.lower() == ".pdf"
 
     backend, model_override = LLM_CONFIG[llm]
-    extract_fn = extract_with_gemini if backend == "gemini" else extract_with_claude
+    if backend == "gemini":
+        extract_fn = extract_with_gemini
+    elif backend == "claude":
+        extract_fn = extract_with_claude
+    else:
+        extract_fn = extract_with_openai
     extra_kwargs: dict = {}
     if model_override:
         extra_kwargs["model_name"] = model_override
@@ -587,4 +691,4 @@ if __name__ == "__main__":
     print(f"Total: {total_elapsed:.1f}s")
 
     # Explicitly delete cached clients to avoid ImportError at shutdown
-    del _gemini_client, _claude_client
+    del _gemini_client, _claude_client, _openai_client
