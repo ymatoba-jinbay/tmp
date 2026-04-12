@@ -53,9 +53,7 @@ def _load_user_credentials(email: str) -> UserCredentials:
         )
     client_creds = json.loads(GOG_CREDENTIALS_PATH.read_text())
 
-    with tempfile.NamedTemporaryFile(
-        mode="w+", suffix=".json", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tmp:
         token_path = Path(tmp.name)
     try:
         subprocess.run(
@@ -81,9 +79,7 @@ def _load_user_credentials(email: str) -> UserCredentials:
 
     refresh_token = token_data.get("refresh_token")
     if not refresh_token:
-        raise RuntimeError(
-            f"gog export for {email} did not contain a refresh_token"
-        )
+        raise RuntimeError(f"gog export for {email} did not contain a refresh_token")
 
     return UserCredentials(
         token=None,
@@ -108,6 +104,7 @@ def _load_credentials(
             "set KAJIMA_GOOGLE_ACCOUNT."
         )
     return _load_user_credentials(google_account)
+
 
 # ----- Colors (matches reference sheet) -----
 HEADER_BG = {"red": 0.26, "green": 0.52, "blue": 0.96}  # Google blue
@@ -138,9 +135,9 @@ class SheetSpec:
     # render a white→green gradient across numeric data rows.
     gradient_cols: list[tuple[int, int]] | None = None
     # Same but for the "summary" rows at the bottom (different color).
-    summary_gradient: (
-        tuple[int, int, int] | None
-    ) = None  # (start_col, end_col, summary_row_count)
+    summary_gradient: tuple[int, int, int] | None = (
+        None  # (start_col, end_col, summary_row_count)
+    )
     # Columns (0-indexed) to format as percent (e.g. 0.873 -> "87.3%").
     percent_cols: list[int] | None = None
     # Enable basic filter sorted by this column (0-indexed, DESC).
@@ -183,8 +180,7 @@ def build_spreadsheet(
     created = sheets_api.spreadsheets().create(body=create_body).execute()
     spreadsheet_id = created["spreadsheetId"]
     sheet_ids: dict[str, int] = {
-        s["properties"]["title"]: s["properties"]["sheetId"]
-        for s in created["sheets"]
+        s["properties"]["title"]: s["properties"]["sheetId"] for s in created["sheets"]
     }
 
     # --- 2. upload values for each tab ---

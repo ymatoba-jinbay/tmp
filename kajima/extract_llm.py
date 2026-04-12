@@ -5,7 +5,6 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 from dotenv import load_dotenv
 
@@ -515,7 +514,9 @@ def extract_with_openai(
             total_usage.input_tokens += response.usage.prompt_tokens
             total_usage.output_tokens += response.usage.completion_tokens
 
-        result_text = _strip_markdown_fences((response.choices[0].message.content or "").strip())
+        result_text = _strip_markdown_fences(
+            (response.choices[0].message.content or "").strip()
+        )
 
         try:
             data = _parse_and_validate(result_text, schema)
@@ -564,9 +565,13 @@ def process_file(
 
     try:
         if is_pdf and parse_type == "jpg":
-            result = extract_fn(stem, images=_pdf_to_images(file_path), xml_dir=xml_dir, **extra_kwargs)
+            result = extract_fn(
+                stem, images=_pdf_to_images(file_path), xml_dir=xml_dir, **extra_kwargs
+            )
         elif is_pdf:
-            result = extract_fn(stem, pdf_path=file_path, xml_dir=xml_dir, **extra_kwargs)
+            result = extract_fn(
+                stem, pdf_path=file_path, xml_dir=xml_dir, **extra_kwargs
+            )
         else:
             text = file_path.read_text(encoding="utf-8")
             result = extract_fn(stem, text=text, xml_dir=xml_dir, **extra_kwargs)

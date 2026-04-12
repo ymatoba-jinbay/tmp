@@ -74,7 +74,9 @@ def write_summary_tsvs(
         for (llm, pt), s in sorted(
             summaries.items(), key=lambda x: x[1]["overall_f1"], reverse=True
         ):
-            for section, stats in sorted(s.get("section_analysis", {}).get("sub", {}).items()):
+            for section, stats in sorted(
+                s.get("section_analysis", {}).get("sub", {}).items()
+            ):
                 f.write(
                     f"{llm}\t{pt}\t{section}\t"
                     f"{stats['correct']}\t{stats['incorrect']}\t"

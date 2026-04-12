@@ -400,9 +400,7 @@ def evaluate_single(
     }
 
 
-def _calc_metrics(
-    correct: int, incorrect: int, not_extracted: int
-) -> dict[str, float]:
+def _calc_metrics(correct: int, incorrect: int, not_extracted: int) -> dict[str, float]:
     """Calculate precision, recall, F1 from counts."""
     evaluated = correct + incorrect
     precision = correct / evaluated if evaluated > 0 else 0.0
