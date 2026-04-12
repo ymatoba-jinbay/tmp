@@ -52,6 +52,8 @@ PARSE_TYPES = [
     "position_spatial",
     "pymupdf4llm",
     "pymupdf",
+    "odl_fast",
+    "odl_hybrid",
 ]
 
 LLM_CHOICES = [

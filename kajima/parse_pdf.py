@@ -18,6 +18,8 @@ class ExtractionType(str, Enum):
     PYMUPDF4LLM = "pymupdf4llm"
     HTML = "html"
     PYMUPDF = "pymupdf"
+    ODL_FAST = "odl_fast"
+    ODL_HYBRID = "odl_hybrid"
 
 
 def _flush_vertical_group(
@@ -285,6 +287,36 @@ def _extract_with_pymupdf(pdf_path: Path) -> str:
     return "\n\n".join(pages)
 
 
+def _extract_with_odl(pdf_path: Path, *, hybrid: bool = False) -> str:
+    """Extract markdown from PDF using opendataloader-pdf.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        hybrid: If True, use hybrid mode (docling-fast backend).
+    """
+    import tempfile
+
+    import opendataloader_pdf
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        kwargs: dict = {
+            "input_path": [str(pdf_path)],
+            "output_dir": tmpdir,
+            "format": "markdown",
+            "quiet": True,
+        }
+        if hybrid:
+            kwargs["hybrid"] = "docling-fast"
+        opendataloader_pdf.convert(**kwargs)
+
+        md_files = list(Path(tmpdir).glob("*.md"))
+        if not md_files:
+            raise FileNotFoundError(
+                f"opendataloader-pdf produced no output for {pdf_path.name}"
+            )
+        return md_files[0].read_text(encoding="utf-8")
+
+
 def _convert_markdown_to_html(md_path: Path) -> str:
     """Convert a parsed markdown file to HTML."""
     import markdown
@@ -319,6 +351,10 @@ def extract_text_from_pdf(
             )
         case ExtractionType.PYMUPDF:
             return _extract_with_pymupdf(pdf_path)
+        case ExtractionType.ODL_FAST:
+            return _extract_with_odl(pdf_path, hybrid=False)
+        case ExtractionType.ODL_HYBRID:
+            return _extract_with_odl(pdf_path, hybrid=True)
 
 
 _SUFFIX_MAP: dict[ExtractionType, str] = {
@@ -326,6 +362,8 @@ _SUFFIX_MAP: dict[ExtractionType, str] = {
     ExtractionType.PYMUPDF4LLM: ".md",
     ExtractionType.HTML: ".html",
     ExtractionType.PYMUPDF: ".md",
+    ExtractionType.ODL_FAST: ".md",
+    ExtractionType.ODL_HYBRID: ".md",
 }
 
 
