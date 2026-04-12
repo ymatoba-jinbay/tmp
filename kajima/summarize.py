@@ -10,27 +10,26 @@ from pathlib import Path
 from kajima.extract_llm import FILES_DIR
 
 
-def _find_eval_dirs(files_dir: Path) -> dict[str, Path]:
-    """Find all evaluations_*/ directories and return {llm_name: path}."""
-    result = {}
-    for d in sorted(files_dir.iterdir()):
-        if d.is_dir() and d.name.startswith("evaluations_"):
-            llm = d.name.removeprefix("evaluations_")
-            result[llm] = d
-    return result
-
-
-def _load_summaries(
-    eval_dirs: dict[str, Path],
+def load_evaluations(
+    files_dir: Path,
+    llm_filter: list[str] | None = None,
 ) -> dict[tuple[str, str], dict]:
-    """Load all evaluation JSONs. Returns {(llm, parse_type): summary}."""
-    summaries: dict[tuple[str, str], dict] = {}
-    for llm, eval_dir in eval_dirs.items():
-        for json_file in sorted(eval_dir.glob("*.json")):
-            parse_type = json_file.stem
-            with open(json_file, "r", encoding="utf-8") as f:
-                summaries[(llm, parse_type)] = json.load(f)
-    return summaries
+    """Load all evaluation JSONs.
+
+    Returns {(llm, parse_type): summary_dict}.
+    If ``llm_filter`` is given, only those LLMs are loaded.
+    """
+    out: dict[tuple[str, str], dict] = {}
+    for d in sorted(files_dir.iterdir()):
+        if not (d.is_dir() and d.name.startswith("evaluations_")):
+            continue
+        llm = d.name.removeprefix("evaluations_")
+        if llm_filter is not None and llm not in llm_filter:
+            continue
+        for jf in sorted(d.glob("*.json")):
+            with open(jf, "r", encoding="utf-8") as f:
+                out[(llm, jf.stem)] = json.load(f)
+    return out
 
 
 def write_summary_tsvs(
@@ -116,15 +115,12 @@ def write_summary_tsvs(
 
 
 def main() -> None:
-    eval_dirs = _find_eval_dirs(FILES_DIR)
-    if not eval_dirs:
+    summaries = load_evaluations(FILES_DIR)
+    if not summaries:
         print(f"No evaluations_*/ directories found in {FILES_DIR}")
         raise SystemExit(1)
 
-    print(f"Found evaluation directories: {list(eval_dirs.keys())}")
-    summaries = _load_summaries(eval_dirs)
     print(f"Loaded {len(summaries)} evaluation results")
-
     write_summary_tsvs(summaries, FILES_DIR)
 
 

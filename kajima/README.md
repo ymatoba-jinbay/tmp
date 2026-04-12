@@ -179,6 +179,91 @@ uv run python -m kajima.summarize
 | `evaluation_summary_overall.tsv` | モデル×parse type別の全体メトリクス |
 | `evaluation_summary_subsection.tsv` | モデル×parse type×セクション別のメトリクス |
 
+### Step 1-4 をまとめて実行: `pipeline`
+
+`collect_labels` → `evaluate`（全LLM × 全parse_type） → `summarize` TSV出力 →
+フォーマット済みGoogle Sheet作成 を1コマンドで実行する。
+
+```bash
+# 毎回 --google-account を指定する場合
+uv run python -m kajima.pipeline --google-account you@example.com
+
+# 環境変数で固定しておくと指定不要
+export KAJIMA_GOOGLE_ACCOUNT=you@example.com
+uv run python -m kajima.pipeline
+
+# 特定のLLMだけ（未指定なら results_{llm}/ から自動検出）
+uv run python -m kajima.pipeline --llm gemini,claude
+
+# 評価はスキップしてTSV+シートだけ再生成
+uv run python -m kajima.pipeline --skip-evaluate
+
+# シート作成はスキップ（evaluate + summarize TSVだけ）
+uv run python -m kajima.pipeline --no-sheet
+
+# 他メンバーにもeditor権限を付与したい
+uv run python -m kajima.pipeline --share-with teammate@example.com
+```
+
+オプション:
+
+| フラグ | 説明 | デフォルト |
+|---|---|---|
+| `--llm` | 対象LLM（カンマ区切り） | `results_{llm}/` から自動検出 |
+| `--xml-dir` | XMLディレクトリ | `kajima/files/xml` |
+| `--skip-evaluate` | 評価ステップを飛ばす（既存 `evaluations_*/*.json` を再利用） | false |
+| `--no-sheet` | Google Sheet作成を飛ばす（evaluate + TSVだけ） | false |
+| `--sheet-title` | 作成するSpreadsheetのタイトル | `kajima 精度検証 YYYY-MM-DD HH:MM` |
+| `--google-account` | **シート作成の認証に使うGoogleアカウント(OAuth、既定)** | `$KAJIMA_GOOGLE_ACCOUNT` |
+| `--share-with` | 追加でeditor権限を付与するGoogleアカウント | `$KAJIMA_SHEET_SHARE_WITH` |
+| `--credentials` | GCPサービスアカウントjson（指定時はOAuthではなくSA認証を使う） | なし |
+
+作成されるSpreadsheetは以下の5タブを持ち、参考フォーマット
+([精度検証_修正版](https://docs.google.com/spreadsheets/d/1IHoVQaH3Qf8UIC0qVFExAo4CzIMvs50wOAHfEIf1ojQ/edit))
+に合わせたヘッダー色・frozen行/列・条件付き書式・basic filterが適用される:
+
+| タブ | 内容 | Frozen | 条件付き書式 |
+|---|---|---|---|
+| `Summary` | llm × parse_type の全体メトリクス（f1降順） | 先頭2列 | precision/recall/f1 の緑グラデ |
+| `Detail` | llm × parse_type × subsection の内訳（precision降順のbasic filter付き） | 先頭1行 | precision/recall/f1 の緑グラデ |
+| `Precision` | subsection × (llm_parse_type) の precision ピボット | 先頭1行+1列 | データ全体の緑グラデ |
+| `Failed Patterns` | overall precisionより0.2以上低いsubsectionの誤答例（subsectionごとに最大10件） | 先頭1行 | — |
+| `Error Types` | エラー種別の件数・比率。末尾に各LLMの「全体」行 | 先頭1行 | 主データ緑／全体行オレンジ |
+
+共通フォーマット: ヘッダー行は青背景+白太字中央寄せ、precision/recall/f1やratio列は `0.0%` 表記、カラム幅はauto-resize。
+
+#### 認証方式（シート作成に必要）
+
+デフォルトは **OAuthユーザー認証** (gog CLI 経由)。`--google-account <email>`
+で指定した Google アカウントで作成されるため、そのユーザーのMy Driveルートに
+直接ファイルが現れる。
+
+事前に gog CLI でアカウント登録が必要:
+
+```bash
+gog auth add you@example.com          # ブラウザでOAuth同意 (初回のみ)
+gog auth list                          # 登録状態の確認
+```
+
+実装上は以下を行っている (`kajima/sheet_builder.py`):
+
+1. 実行時に `gog auth tokens export <email> --out <tmp>` で refresh token を一時取得
+2. `~/.config/gogcli/credentials.json` の OAuth client_id / client_secret と組み合わせて
+   `google.oauth2.credentials.Credentials` を生成
+3. 一時ファイルを即削除（refresh token を永続化しない）
+4. その credentials で Sheets API / Drive API を直接叩く（frozen、条件付き書式、basic filterなど
+   batchUpdate で一気に適用）
+
+サービスアカウント認証（`--credentials jinbay-gcp.json`）も残してあるが、
+service account は Drive ストレージを持たないため、そのままでは
+`storageQuotaExceeded` になる。使う場合は Shared Drive か Domain-Wide Delegation の
+設定が前提で、`kajima-dev` プロジェクトで以下2つのAPIが有効である必要もある:
+
+- Google Sheets API: https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=844348756373
+- Google Drive API: https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=844348756373
+
+通常は OAuth（`--google-account`）を使うのが簡単。
+
 ### XMLの単独解析
 
 ```bash

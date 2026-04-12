@@ -49,7 +49,7 @@ def _flatten(
     return out
 
 
-def _section_key(field: str) -> str:
+def section_key(field: str) -> str:
     """Extract section key (top 2 levels) from a dot-notation field.
 
     e.g. "コア情報.標準貫入試験[0].開始深度" -> "コア情報.標準貫入試験"
@@ -178,7 +178,7 @@ def _mark_unexpected_llm_fields(
                     {
                         "field": field,
                         "top_section": _top_section_key(field),
-                        "section": _section_key(field),
+                        "section": section_key(field),
                         "status": "incorrect",
                         "error_type": "false_positive",
                         "xml": "",
@@ -213,7 +213,7 @@ def _mark_unexpected_llm_fields(
                 {
                     "field": prefix,
                     "top_section": _top_section_key(prefix),
-                    "section": _section_key(prefix),
+                    "section": section_key(prefix),
                     "status": "incorrect",
                     "error_type": "false_positive",
                     "xml": xml_value,
@@ -244,7 +244,7 @@ def _compare_values(
             {
                 "field": key,
                 "top_section": _top_section_key(key),
-                "section": _section_key(key),
+                "section": section_key(key),
                 "status": "not_extracted",
                 "xml": xml_value,
                 "llm": "",
@@ -266,7 +266,7 @@ def _compare_values(
             {
                 "field": key,
                 "top_section": _top_section_key(key),
-                "section": _section_key(key),
+                "section": section_key(key),
                 "status": "correct",
                 "xml": xml_value,
                 "llm": llm_value,
@@ -279,7 +279,7 @@ def _compare_values(
             {
                 "field": key,
                 "top_section": _top_section_key(key),
-                "section": _section_key(key),
+                "section": section_key(key),
                 "status": "incorrect",
                 "error_type": error_type,
                 "xml": xml_value,
